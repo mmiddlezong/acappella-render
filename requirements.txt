@@ -1,0 +1,7 @@
+numpy
+scipy
+cmudict
+lameenc
+# optional
+pypinyin
+music21
