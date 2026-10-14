@@ -46,6 +46,7 @@ VOWEL_F = {
     "3": (480, 1350, 1700), "y": (300, 1850, 2300), "1": (380, 1500, 2400),
     "M": (350, 1250, 2350),
     "7": (600, 1050, 2500),      # Korean eo: open-mid back unrounded
+    "A": (680, 1020, 2400),      # the round, dark "ah" of a cappella "dah"/"bah"
 }
 VOWEL_B = (70.0, 90.0, 130.0, 170.0, 220.0)
 # How loud each vowel comes out of the vocal tract relative to "a" (dB).
@@ -53,7 +54,7 @@ VOWEL_B = (70.0, 90.0, 130.0, 170.0, 220.0)
 VOWEL_LEVEL_DB = {
     "a": 0.0, "ae": -1.9, "E": -3.1, "e": -3.5, "i": -5.3, "I": -4.0, "o": -0.5,
     "O": 0.6, "u": -2.5, "U": -2.3, "V": -1.4, "@": -2.9, "M": -4.0, "1": -4.0,
-    "3": -2.4, "y": -5.0, "7": -0.8,
+    "3": -2.4, "y": -5.0, "7": -0.8, "A": -0.6,
 }
 VOWEL_GAIN = {v: 10 ** (-0.5 * db / 20.0) for v, db in VOWEL_LEVEL_DB.items()}
 
@@ -399,7 +400,7 @@ class Singer:
     def _burst(self, t, c, amp_scale=1.0):
         voiced, clo, fc, bw, amp, blen, asp = STOP[c]
         fc = fc * (1.1 if self.fs > 1.08 else 1.0)
-        g = BURST_GAIN * (0.9 if voiced else 1.0)
+        g = BURST_GAIN * (0.65 if voiced else 1.0)
         self.fric.append((t, t + blen + 0.004, fc, bw, amp * amp_scale * g, 0.0015, blen))
 
     def _onset_cons(self, c, a, b, vowel, after_silence=False):
@@ -593,6 +594,12 @@ class Singer:
         self.units = units
 
     def _write_unit(self, u: Unit, prev: Unit | None, nxt: Unit | None):
+        if not u.word:
+            # backing vocables: the round "ah" of a cappella "dah", and a
+            # warmer, less pressed tone that blends
+            u.nucleus = ["A" if p == "a" else p for p in u.nucleus]
+            if u.nucleus and u.nucleus[0] in ("A", "ae", "V", "O", "E", "7"):
+                self.qoff[self._span(u.c_start, u.eff_off + 0.05)] -= 0.12
         vowels = [p for p in u.nucleus if p in VOWEL_F]
         nuc_son = [p for p in u.nucleus if p in SONORANT_F]
         main = vowels[0] if vowels else None
@@ -763,7 +770,7 @@ class Singer:
         att = min(att, 0.5 * room)
         v0 = min(target, float(self.AV[max(0, i_on - 1)]))
         self._rcos(self.AV, t_on, t_on + att, v0, target)
-        b0 = 0.75 if base in STOP or base in AFFRIC else 0.35 + 0.65 * v0 / target
+        b0 = 0.55 if base in STOP or base in AFFRIC else 0.35 + 0.65 * v0 / target
         self._rcos(self.bloom, t_on, t_on + att, b0, 1.0)
         # aspiration / breathy noise fades under the vowel instead of stopping
         h0 = float(self.AH[max(0, i_on - 1)])

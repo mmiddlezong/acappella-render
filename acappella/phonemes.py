@@ -101,6 +101,11 @@ _EXCEPTIONS: dict[str, Syllable] = {
 }
 
 
+# closed-a vocables sung with "ah" even though they're also dictionary words
+_AH_VOCABLES = {"dat", "bam", "dam", "dan", "ban", "bat", "pap", "wap", "tat", "dap", "bap",
+                "dahm", "bahm"}
+
+
 def _norm(token: str) -> str:
     t = unicodedata.normalize("NFKC", token).strip().lower()
     t = re.sub(r"[\"'“”‘’`.,!?;:()\[\]{}…\-–—_~*]", "", t)
@@ -1231,6 +1236,8 @@ class Phonemizer:
                 return (ph, ["n"], ["*ghost*"])
         g = _parse_acappella(tok)
         in_cmu = tok in _cmu_dict()
+        if g and g[1] == ["ae"] and (not in_cmu or tok in _AH_VOCABLES):
+            g = (g[0], ["a"], g[2])          # "bap", "dat": the a cappella "ah", not "cat"
         # Prefer the dictionary for real words, the grammar for vocables.
         vocable_like = bool(re.search(r"(oo|ah|oh|eh|uh|aa|ee|aw)", tok)) or len(tok) <= 3
         if g and (vocable_like or not in_cmu):
