@@ -40,6 +40,7 @@ class Item:
     extra: list = field(default_factory=list)   # more syllables on the same note
     sim: bool = False
     korean: bool = False
+    word: bool = False
 
     @property
     def end(self):
@@ -247,10 +248,11 @@ def _units_for_line(items: list[Item], tm: TimeMap, breaths: list, offset: float
                 warnings.append(f"{name}: notes before the first lyric are sung on 'oo'")
         onset, nucleus, coda = syl
         ghost = "*ghost*" in coda or it.ghost
+        word = it.word if it.lyric else (cur.word if cur is not None else False)
         cur = Unit(onset=list(onset), nucleus=list(nucleus),
                    coda=[c for c in coda if c != "*ghost*"], notes=[note],
                    accent=it.accent - (6.0 if it.ghost else 0.0), ghost=ghost,
-                   legato_in=prev_legato and contiguous)
+                   legato_in=prev_legato and contiguous, word=word)
         units.append(cur)
         cur_end = it.end
         if it.extra and not it.sim:
@@ -262,7 +264,7 @@ def _units_for_line(items: list[Item], tm: TimeMap, breaths: list, offset: float
                 a2 = note.t0 + seg * (j + 1)
                 n2note = SungNote(t0=a2, t1=a2 + seg, midi=it.pitch)
                 cur = Unit(onset=list(o2), nucleus=list(n2), coda=list(c2), notes=[n2note],
-                           legato_in=True)
+                           legato_in=True, word=it.word)
                 units.append(cur)
             cur.notes[-1].t1 = max(t1, cur.notes[-1].t0 + 0.02)
     if resung:
@@ -349,6 +351,51 @@ def voice_kind(staff: Staff, items) -> str:
     return "baritone"
 
 
+# a cappella vocables: never a lyric word
+_VOCABLE_RE = re.compile(
+    r"^(d|b|t|j|h|w|l|n|m)?(oo+h?|ooh|ah+|aah|uh+|oh+|eh|mm+|hmm+|n+|m+|ng)$"
+    r"|^(doot|dat|dut|dit|bap|bop|bahm|bm|dm|dn|jn|dng|ding|dum|bum|dun|doom|loo|woh|whoo)$"
+    r"|^[^aeiouy]+$")
+# tokens that are both a vocable and a real word in some language (da, ba,
+# wo, la...): a word only inside a phrase that has other words in it
+_AMBIGUOUS = {"da", "ba", "la", "na", "ma", "pa", "ta", "wa", "ya", "wo", "do", "di", "dee",
+              "ha", "ho", "hu", "a", "o", "u", "ra", "ri", "ru", "re", "ro", "du", "de", "be",
+              "bi", "bo", "bu", "dan", "dang", "bam", "bang",
+              # Hangul vocables that are also words
+              "다", "나", "아", "오", "우", "라", "바", "두", "디"}
+_HANGUL_VOCABLES = {"음", "흠", "응", "흥", "음음", "흠흠", "으음", "둡", "둠", "빰", "빠", "따",
+                    "뚜", "뚜루", "두비", "ㅁ", "ㄴ", "ㅇ"}
+
+
+def _mark_words(items: list[Item]) -> None:
+    """Flag the lyric words (as opposed to vocables) for --neutral."""
+    from .phonemes import _norm, classify
+    kinds = []
+    for it in items:
+        if not it.lyric or not re.search(r"\w", it.lyric) or SIM_RE.match(it.lyric.strip()):
+            kinds.append(None)
+            continue
+        t = _norm(it.lyric)
+        if classify(it.lyric) != "latin":
+            hummed = it.syl is not None and list(it.syl[1]) in (["m"], ["n"], ["N"])
+            if t in _HANGUL_VOCABLES and (hummed or t[0] not in "음흠응흥"):
+                kinds.append("V")             # a hum or a Hangul vocable (not 음 in 음악)
+            else:
+                kinds.append("A" if t in _AMBIGUOUS else "W")
+            continue
+        kinds.append("V" if _VOCABLE_RE.match(t) else ("A" if t in _AMBIGUOUS else "W"))
+    # phrases: runs of notes without a rest
+    k = 0
+    while k < len(items):
+        j = k
+        while j + 1 < len(items) and items[j + 1].start - items[j].end <= EPS:
+            j += 1
+        has_word = any(kinds[i] == "W" for i in range(k, j + 1))
+        for i in range(k, j + 1):
+            items[i].word = kinds[i] == "W" or (kinds[i] == "A" and has_word)
+        k = j + 1
+
+
 def _lyric_words(score: Score) -> list:
     """Lyric words as lists of their hyphenated pieces (for language
     detection)."""
@@ -393,6 +440,7 @@ def plan(score: Score, tm: TimeMap, offset: float, lang: str, n_frames: int):
         for name, items in _lines_for_staff(st):
             items = _merge_ties(items)
             _assign_syllables(items, phon, warnings, st.breaths)
+            _mark_words(items)
             units = _units_for_line(items, tm, st.breaths, offset, warnings, name)
             for t, db in accents:
                 for u in units:

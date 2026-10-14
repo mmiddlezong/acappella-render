@@ -169,6 +169,7 @@ class Unit:
     accent: float = 0.0
     ghost: bool = False
     legato_in: bool = False
+    word: bool = False             # a lyric word (not a vocable like doo/dm)
     # filled in by the planner
     c_start: float = 0.0
     c_scale: float = 1.0

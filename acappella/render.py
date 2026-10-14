@@ -39,6 +39,33 @@ def _match(name: str, keys) -> str | None:
     return None
 
 
+def _neutral_syllable(text: str):
+    """Phonemes for the neutral syllable (e.g. "ah", "doo", "loo")."""
+    from .phonemes import Phonemizer
+    return Phonemizer("en").word([text])[0]
+
+
+def _neutralize(units, syl):
+    """Same notes, rhythm, ties, slurs and accents, but every lyric word
+    replaced by one neutral syllable (melismas stay melismas; vocables like
+    doo/dm are left alone)."""
+    import copy
+    onset, nucleus, coda = syl
+    out = []
+    for u in units:
+        v = copy.deepcopy(u)
+        if not u.word:
+            out.append(v)
+            continue
+        # a slurred syllable change (legato_in) becomes a plain re-sung vowel
+        v.onset = [] if u.legato_in else list(onset)
+        v.nucleus, v.coda = list(nucleus), list(coda)
+        for n in v.notes:
+            n.nucleus = None
+        out.append(v)
+    return out
+
+
 def _reverb_ir(rt60=1.3, length=2.2, seed=7):
     rng = np.random.default_rng(seed)
     L = int(length * SR)
@@ -109,7 +136,7 @@ def _write_audio(path: Path, stereo: np.ndarray, bitrate=192):
 def render_score(path, out=None, bpm=None, tempo_scale=1.0, lang="auto", voices=None,
                  gains=None, focus=None, only=None, mute=None, stems=False, reverb=0.25,
                  vibrato=1.0, measures=None, report=False, quiet=False, singers=2,
-                 humanize=1.0, breaths=1.0, attack=1.0):
+                 humanize=1.0, breaths=1.0, attack=1.0, neutral=None, solo=None):
     t_start = time.time()
     path = Path(path)
     score = load_score(path)
@@ -138,6 +165,9 @@ def render_score(path, out=None, bpm=None, tempo_scale=1.0, lang="auto", voices=
     gains = _parse_map(gains, float)
     focus = [f.lower() for f in (focus or [])]
     only = [f.lower() for f in (only or [])]
+    solo = [f.lower() for f in (solo or [])]
+    neutral_syl = _neutral_syllable(neutral) if neutral else None
+    solo_names = []
     mute = [f.lower() for f in (mute or [])]
 
     staff_names = []
@@ -162,7 +192,16 @@ def render_score(path, out=None, bpm=None, tempo_scale=1.0, lang="auto", voices=
         key = _match(nm, voices.keys())
         if key:
             kind = voices[key]
-        is_solo = st.instrument == "voice" or any(w in nm for w in ("solo", "lead", "voice"))
+        if solo:
+            is_solo = bool(_match(nm, solo))
+        else:
+            is_solo = st.instrument == "voice" or any(w in nm for w in ("solo", "lead", "voice"))
+        if neutral_syl:
+            n_words = sum(1 for u in units if u.word)
+            if n_words:
+                units = _neutralize(units, neutral_syl)
+                lines[k] = (st, name, units, gain)      # so --report shows it too
+                solo_names.append(f"{name} ({n_words})")
         vib = (28.0 if is_solo else 12.0) * vibrato
         seed = zlib.crc32(name.encode()) & 0xFFFF
         # backing parts are sung by a small section: each singer is a little
@@ -230,6 +269,11 @@ def render_score(path, out=None, bpm=None, tempo_scale=1.0, lang="auto", voices=
         for name, kind, nu, ns in rendered:
             who = f"  x{ns} singers" if ns > 1 else ""
             print(f"  {name:22s} {kind:14s} {nu:4d} syllables{who}")
+        if neutral_syl:
+            if solo_names:
+                print(f"  lyric words sung on '{neutral}': " + ", ".join(solo_names))
+            else:
+                print("  note: --neutral found no lyric words to replace")
         seen = set()
         for w in warnings:
             if w not in seen:
@@ -267,6 +311,11 @@ def main(argv=None):
     p.add_argument("--lang", default="auto", choices=["auto", "en", "ja", "zh", "ko"],
                    help="how to read Latin-letter lyrics (auto-detected by default); "
                         "ko reads romanized Korean")
+    p.add_argument("--neutral", nargs="?", const="ah", metavar="SYLLABLE",
+                   help="sing every lyric word on one neutral syllable, in every part; "
+                        "vocables (doo, dm...) are kept (default 'ah'; e.g. --neutral loo)")
+    p.add_argument("--solo", action="append", metavar="PART",
+                   help="which part(s) are the soloist (default: parts named Voice/Solo/Lead)")
     p.add_argument("--voice", action="append", metavar="PART=TYPE",
                    help="set a part's voice: soprano, mezzo-soprano, alto, tenor, baritone, bass")
     p.add_argument("--gain", action="append", metavar="PART=DB", help="adjust a part's level")
@@ -291,7 +340,7 @@ def main(argv=None):
                  voices=a.voice, gains=a.gain, focus=a.focus, only=a.only, mute=a.mute,
                  stems=a.stems, reverb=a.reverb, vibrato=a.vibrato, measures=a.measures,
                  report=a.report, singers=a.singers, humanize=a.humanize, breaths=a.breaths,
-                 attack=a.attack)
+                 attack=a.attack, neutral=a.neutral, solo=a.solo)
 
 
 if __name__ == "__main__":
