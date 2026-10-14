@@ -17,6 +17,7 @@ from .synth import CR, SR, Singer
 
 PREROLL = 0.35
 TAIL = 2.5
+LANG_NAMES = {"en": "English", "ja": "Japanese romaji/kana", "zh": "Chinese"}
 
 
 def _parse_map(items, cast=str):
@@ -106,7 +107,8 @@ def _write_audio(path: Path, stereo: np.ndarray, bitrate=192):
 
 def render_score(path, out=None, bpm=None, tempo_scale=1.0, lang="auto", voices=None,
                  gains=None, focus=None, only=None, mute=None, stems=False, reverb=0.25,
-                 vibrato=1.0, measures=None, report=False, quiet=False):
+                 vibrato=1.0, measures=None, report=False, quiet=False, singers=2,
+                 humanize=1.0, breaths=1.0, attack=1.0):
     t_start = time.time()
     path = Path(path)
     score = load_score(path)
@@ -162,27 +164,44 @@ def render_score(path, out=None, bpm=None, tempo_scale=1.0, lang="auto", voices=
         is_solo = st.instrument == "voice" or any(w in nm for w in ("solo", "lead", "voice"))
         vib = (28.0 if is_solo else 12.0) * vibrato
         seed = zlib.crc32(name.encode()) & 0xFFFF
-        singer = Singer(kind, total, seed=seed, vibrato_cents=vib,
-                        breathiness=0.08 if is_solo else 0.06)
-        singer.sing(units)
-        y = singer.render(gain)
+        # backing parts are sung by a small section: each singer is a little
+        # different (timing, tuning, vibrato, vocal tract), which is most of
+        # what keeps a held chord from sounding like an organ
+        n_sing = 1 if is_solo else max(1, int(singers))
+        voices_out = []
+        for s in range(n_sing):
+            spread = 0.0 if n_sing == 1 else (2.0 * s / (n_sing - 1) - 1.0)    # -1..1
+            singer = Singer(kind, total, seed=seed + 7919 * s,
+                            vibrato_cents=vib * (1.0 + 0.15 * spread),
+                            breathiness=0.08 if is_solo else 0.06,
+                            humanize=humanize,
+                            breaths=breaths * (1.0 if is_solo else 0.6) / np.sqrt(n_sing),
+                            attack=attack, scoop_cents=30.0 if is_solo else 18.0,
+                            formant_shift=1.0 + 0.0125 * spread,
+                            detune_cents=3.0 * spread)
+            singer.sing(units, gain_db=gain)
+            voices_out.append((spread, singer.render(gain)[:N]))
+        y = np.sum([v for _s, v in voices_out], axis=0)
         # every part is calibrated to the same loudness at 'f' (0 dB); the
         # dynamics curve already applied inside render() sets the real level
         g = np.interp(np.arange(len(y)) / SR * CR, np.arange(len(gain)), gain)
         ref = _loudness(y / 10 ** (g / 20.0))
-        y = y / ref * 0.12
         part_db = gains.get(_match(nm, gains.keys()) or "", 0.0)
         if is_solo:
             part_db += 2.0
         if focus:
             part_db += 4.0 if _match(nm, focus) else -9.0
-        y = y[:N] * 10 ** (part_db / 20.0)
-        pan = _pan(staff_names.index(st.name), len(staff_names), st.name, kind)
-        lg, rg = np.cos((pan + 1) * np.pi / 4), np.sin((pan + 1) * np.pi / 4)
-        mix[:len(y), 0] += y * lg * np.sqrt(2)
-        mix[:len(y), 1] += y * rg * np.sqrt(2)
+        scale = 0.12 / ref * 10 ** (part_db / 20.0)
+        pan0 = _pan(staff_names.index(st.name), len(staff_names), st.name, kind)
+        for spread, ys in voices_out:
+            ys = ys * scale
+            pan = float(np.clip(pan0 + 0.12 * spread, -1.0, 1.0))
+            lg, rg = np.cos((pan + 1) * np.pi / 4), np.sin((pan + 1) * np.pi / 4)
+            mix[:len(ys), 0] += ys * lg * np.sqrt(2)
+            mix[:len(ys), 1] += ys * rg * np.sqrt(2)
+        y = y * scale
         stem_sigs.setdefault(st.name, np.zeros(N))[:len(y)] += y
-        rendered.append((name, kind, len(units)))
+        rendered.append((name, kind, len(units), n_sing))
 
     if reverb > 0:
         ir = _reverb_ir()
@@ -204,9 +223,10 @@ def render_score(path, out=None, bpm=None, tempo_scale=1.0, lang="auto", voices=
     if not quiet:
         print(f"{score.title}: {total - PREROLL - TAIL:.1f}s of music, "
               f"rendered in {time.time() - t_start:.1f}s -> {out}")
-        print(f"  lyrics read as: {dict(en='English', ja='Japanese romaji/kana', zh='Chinese')[lang_used]}")
-        for name, kind, nu in rendered:
-            print(f"  {name:22s} {kind:14s} {nu:4d} syllables")
+        print(f"  lyrics read as: {LANG_NAMES.get(lang_used, lang_used)}")
+        for name, kind, nu, ns in rendered:
+            who = f"  x{ns} singers" if ns > 1 else ""
+            print(f"  {name:22s} {kind:14s} {nu:4d} syllables{who}")
         seen = set()
         for w in warnings:
             if w not in seen:
@@ -253,12 +273,21 @@ def main(argv=None):
     p.add_argument("--stems", action="store_true", help="also write one file per part")
     p.add_argument("--reverb", type=float, default=0.25, help="0 = dry, 1 = very wet")
     p.add_argument("--vibrato", type=float, default=1.0, help="vibrato amount (0 = straight tone)")
+    p.add_argument("--singers", type=int, default=2,
+                   help="singers on each backing part (default 2; 1 = one voice per part)")
+    p.add_argument("--humanize", type=float, default=1.0,
+                   help="timing/tuning scatter (0 = exactly on the grid and in tune)")
+    p.add_argument("--breaths", type=float, default=1.0,
+                   help="breaths before phrases (0 = none, 2 = very audible)")
+    p.add_argument("--attack", type=float, default=1.0,
+                   help="attack softness (0.5 = crisper, 2 = very soft)")
     p.add_argument("--report", action="store_true", help="print the syllables each part sings")
     a = p.parse_args(argv)
     render_score(a.score, out=a.out, bpm=a.bpm, tempo_scale=a.tempo_scale, lang=a.lang,
                  voices=a.voice, gains=a.gain, focus=a.focus, only=a.only, mute=a.mute,
                  stems=a.stems, reverb=a.reverb, vibrato=a.vibrato, measures=a.measures,
-                 report=a.report)
+                 report=a.report, singers=a.singers, humanize=a.humanize, breaths=a.breaths,
+                 attack=a.attack)
 
 
 if __name__ == "__main__":

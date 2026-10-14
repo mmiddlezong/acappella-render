@@ -181,7 +181,7 @@ def _units_for_line(items: list[Item], tm: TimeMap, breaths: list, offset: float
         syl = it.syl
         if syl is not None and not syl[1] and not syl[2] and not syl[0]:
             syl = None            # "chi-i-ild": a repeated vowel is just held
-        if syl is not None and not syl[1] and cur is not None:
+        if syl is not None and not syl[1] and cur is not None and contiguous:
             # consonant-only piece: keep going on the same syllable
             son = [c for c in syl[2] if c in SONORANT_LIKE]
             obs = [c for c in syl[2] if c not in SONORANT_LIKE]
@@ -192,6 +192,12 @@ def _units_for_line(items: list[Item], tm: TimeMap, breaths: list, offset: float
                 cur.coda = list(cur.coda) + obs
             cur_end = it.end
             continue
+        if syl is not None and not syl[1] and syl[2]:
+            # a consonant-only piece after a rest (Japanese ん, a lone "-l"):
+            # sing it on its own, as a hum or a short hit
+            son = [c for c in syl[2] if c in SONORANT_LIKE]
+            obs = [c for c in syl[2] if c not in SONORANT_LIKE]
+            syl = ([], [son[0]], obs) if son else (obs, ["n"], ["*ghost*"])
         if syl is None or not syl[1]:
             if cur is not None and contiguous and not it.ghost:
                 cur.notes.append(note)               # melisma
