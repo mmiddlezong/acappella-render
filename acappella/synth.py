@@ -379,7 +379,7 @@ class Singer:
         if c in STOP:
             v, clo, *_r, asp = STOP[c]
             # a sung b/d/g is a quick tap rather than a full stop
-            return clo * (0.8 if v else 1.0) + asp
+            return clo * (0.9 if v else 1.0) + asp
         if c in FRIC:
             return FRIC[c][1]
         if c in AFFRIC:
@@ -396,7 +396,7 @@ class Singer:
     def _burst(self, t, c, amp_scale=1.0):
         voiced, clo, fc, bw, amp, blen, asp = STOP[c]
         fc = fc * (1.1 if self.fs > 1.08 else 1.0)
-        g = BURST_GAIN * (0.6 if voiced else 1.0)
+        g = BURST_GAIN * (0.9 if voiced else 1.0)
         self.fric.append((t, t + blen + 0.004, fc, bw, amp * amp_scale * g, 0.0015, blen))
 
     def _onset_cons(self, c, a, b, vowel, after_silence=False):
@@ -412,7 +412,7 @@ class Singer:
             self.SW[sl] = W_CONS
             if voiced:
                 # a sung b/d/g between vowels keeps voicing through the closure
-                self.AV[sl] = 0.05 if after_silence else 0.32
+                self.AV[sl] = 0.05 if after_silence else 0.2
                 self.F[0, sl] = 210 * self.fs
             else:
                 self.AV[sl] = 0.0
@@ -745,9 +745,9 @@ class Singer:
         # out of a consonant
         base = UNRELEASED.get(last, last)
         if base in STOP:
-            att = 0.028 if STOP[base][0] else 0.034
+            att = 0.009 if STOP[base][0] else 0.015    # a stop releases crisply
         elif base in AFFRIC:
-            att = 0.028 if STOP[AFFRIC[base][0]][0] else 0.034
+            att = 0.012 if STOP[AFFRIC[base][0]][0] else 0.018
         elif base in FRIC or base in ("h", "x"):
             att = 0.035
         elif base in ("w", "j", "r"):
@@ -760,7 +760,8 @@ class Singer:
         att = min(att, 0.5 * room)
         v0 = min(target, float(self.AV[max(0, i_on - 1)]))
         self._rcos(self.AV, t_on, t_on + att, v0, target)
-        self._rcos(self.bloom, t_on, t_on + att, 0.35 + 0.65 * v0 / target, 1.0)
+        b0 = 0.75 if base in STOP or base in AFFRIC else 0.35 + 0.65 * v0 / target
+        self._rcos(self.bloom, t_on, t_on + att, b0, 1.0)
         # aspiration / breathy noise fades under the vowel instead of stopping
         h0 = float(self.AH[max(0, i_on - 1)])
         if h0 > 0:
