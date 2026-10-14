@@ -250,7 +250,7 @@ def _hann_smooth(x: np.ndarray, frames: int) -> np.ndarray:
 
 def _damping(z: float, interval: float) -> float:
     """Big leaps overshoot proportionally less than steps do."""
-    return float(min(0.85, z + 0.035 * max(0.0, abs(interval) - 2.0)))
+    return float(min(0.9, z + 0.02 * max(0.0, abs(interval) - 2.0)))
 
 
 def _var_smooth(x: np.ndarray, W: np.ndarray, passes: int = 2) -> np.ndarray:
@@ -817,28 +817,28 @@ class Singer:
             # arrives (nearly) in tune; it may start bending the end of the
             # previous note, but not its first half
             pn = prev.notes[-1]
-            T = float(np.clip(0.5 * (t_on - u.c_start) + 0.02, 0.035, 0.07))
+            T = float(np.clip(0.4 * (t_on - u.c_start), 0.018, 0.035))
             earliest = max(pn.t0 + 0.5 * (pn.t1 - pn.t0), prev.t_on + 0.03)
             ts = max(earliest, t_on - 1.4 * T)
-            z = _damping(0.65, m0 - pn.midi)
+            z = _damping(0.8, m0 - pn.midi)
             self.pplan.append((min(ts, t_on - 0.01), m0, T, z, False, 0.0))
         elif u.legato_in:
             # slurred: the glide is centred on the note change
             pn = prev.notes[-1]
             dl = min(pn.t1 - pn.t0, first.t1 - first.t0)
-            T = float(np.clip(0.3 * dl, 0.04, 0.10))
-            self.pplan.append((t_on - 0.8 * T, m0, T, _damping(0.58, m0 - pn.midi), False, 0.0))
+            T = float(np.clip(0.1 * dl, 0.02, 0.035))
+            self.pplan.append((t_on - 0.8 * T, m0, T, _damping(0.75, m0 - pn.midi), False, 0.0))
         else:
             # a vowel re-sung without a slur: a quick move through the
             # little break between the two vowels
             pn = prev.notes[-1]
-            T = 0.045
-            self.pplan.append((t_on - 1.1 * T, m0, T, _damping(0.65, m0 - pn.midi), False, 0.0))
+            T = 0.022
+            self.pplan.append((t_on - 1.1 * T, m0, T, _damping(0.8, m0 - pn.midi), False, 0.0))
         for j, note in enumerate(notes):
             if j > 0:
                 dl = min(notes[j - 1].t1 - notes[j - 1].t0, note.t1 - note.t0)
-                T = float(np.clip(0.3 * dl, 0.04, 0.10))
-                z = _damping(0.58, note.midi - notes[j - 1].midi)
+                T = float(np.clip(0.1 * dl, 0.02, 0.035))
+                z = _damping(0.75, note.midi - notes[j - 1].midi)
                 self.pplan.append((note.t0 - 0.8 * T, note.midi + det, T, z, False, 0.0))
             if note.gliss and j + 1 < len(notes):
                 g0 = note.t0 + 0.4 * (note.t1 - note.t0)

@@ -216,7 +216,7 @@ def render_score(path, out=None, bpm=None, tempo_scale=1.0, lang="auto", voices=
                             breathiness=0.08 if is_solo else 0.06,
                             humanize=humanize,
                             breaths=breaths * (1.0 if is_solo else 0.6) / np.sqrt(n_sing),
-                            attack=attack, scoop_cents=30.0 if is_solo else 18.0,
+                            attack=attack, scoop_cents=15.0 if is_solo else 10.0,
                             formant_shift=1.0 + 0.0125 * spread,
                             detune_cents=3.0 * spread)
             singer.sing(units, gain_db=gain)
