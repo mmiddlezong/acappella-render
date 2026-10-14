@@ -924,6 +924,18 @@ def looks_romanized_korean(tokens, words=None) -> bool:
     return len(marked) >= 3 and len(marked) >= 0.1 * len(words) and len(ko) >= 0.6 * len(words)
 
 
+_PINYIN_MARK = re.compile(r"^(x|q|zh|c[aeiou]|z[aeiou])|(iang|iong|uang|ueng|ian|iao|ong|eng|ui|iu|ie|uo|ua)$")
+
+
+def looks_pinyin(tokens) -> bool:
+    """Latin lyrics written in pinyin (xin, zhuang, qing, guang, shuo...)."""
+    toks = {re.sub(r"[1-5]$", "", _norm(t)) for t in tokens if t}
+    toks = {t for t in toks if t and re.fullmatch(r"[a-zü]+", t)}
+    py = {t for t in toks if pinyin_syllable(t) is not None}
+    marked = {t for t in py if _PINYIN_MARK.search(t) and t not in _JA_MARKERS}
+    return len(marked) >= 5 and len(py) >= 0.5 * len(toks)
+
+
 def detect_language(tokens, words=None) -> str:
     """'ko' for Hangul, 'ja' for kana or Latin lyrics that look like
     Japanese romaji, 'zh' for Chinese characters, 'ko-rom' for romanized
@@ -941,6 +953,10 @@ def detect_language(tokens, words=None) -> str:
     # so it is tested first, on the vowels only it uses
     if looks_romanized_korean(tokens, words):
         return "ko-rom"
+    # pinyin also shares syllables with romaji (shi, chi, ni, wo); it is told
+    # apart by spellings romaji and English vocables never use
+    if looks_pinyin(tokens):
+        return "zh"
     return "ja" if len(ja) >= 5 else "en"
 
 
@@ -1087,6 +1103,11 @@ class Phonemizer:
                     out.append(self._ja_piece(t))
             return out
 
+        if self.lang == "zh" and n > 1 and _norm(joined) in _cmu_dict():
+            aligned = self._align_cmu(pieces, [_norm(p) for p in pieces],
+                                      [k > 0 and not has_vowel_letter(_norm(p)) for k, p in enumerate(pieces)])
+            if aligned:
+                return aligned
         if self.lang == "zh":
             out = []
             for t, cp in zip(norm, cons_piece):
