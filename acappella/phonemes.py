@@ -11,23 +11,29 @@ Lookup order for Latin-script tokens:
   3. the a cappella spelling grammar ("doo", "dah", "woh", "bahm", "dit"...)
   4. the CMU pronouncing dictionary (real English words)
   5. letter-by-letter fallback rules
-Chinese characters go through pypinyin, kana through a built-in table.
+Chinese characters go through pypinyin, kana through a built-in table,
+Hangul through its own spelling (with Korean sound changes applied across
+the sung line: see korean_sounds).
 """
 from __future__ import annotations
 
 import re
 import unicodedata
+from functools import lru_cache
 
 # ---------------------------------------------------------------- inventory
 VOWELS = {
     "i", "I", "e", "E", "ae", "a", "O", "o", "U", "u", "V", "@", "3", "y", "1", "M",
+    "7",                                   # Korean eo
 }
 NASALS = {"m", "n", "N"}
 LIQUIDS = {"l", "r", "R"}
 GLIDES = {"w", "j"}
-STOPS = {"p", "b", "t", "d", "k", "g"}
-FRICATIVES = {"f", "v", "T", "D", "s", "z", "S", "Z", "C", "h", "x"}
-AFFRICATES = {"tS", "dZ", "ts", "dz"}
+STOPS = {"p", "b", "t", "d", "k", "g",
+         "p'", "t'", "k'", "ph", "th", "kh",   # Korean tense / aspirated
+         "p_}", "t_}", "k_}"}                  # Korean unreleased finals
+FRICATIVES = {"f", "v", "T", "D", "s", "z", "S", "Z", "C", "h", "x", "s'", "S'"}
+AFFRICATES = {"tS", "dZ", "ts", "dz", "tS'", "tSh"}
 CONSONANTS = NASALS | LIQUIDS | GLIDES | STOPS | FRICATIVES | AFFRICATES
 SONORANT_LIKE = NASALS | LIQUIDS
 
@@ -538,14 +544,403 @@ def is_romaji(tok: str) -> bool:
     return bool(tok) and bool(_ROMAJI_RE.match(tok))
 
 
-def detect_language(tokens) -> str:
-    """'ja' if the Latin lyrics look like Japanese romaji, else 'en'."""
+# ------------------------------------------------------------------ Korean
+# Jamo of a Hangul syllable, in Unicode order, spelled like Revised
+# Romanization (initials as written at the start of a syllable).
+_K_INI = ["g", "kk", "n", "d", "tt", "r", "m", "b", "pp", "s", "ss", "", "j", "jj", "ch",
+          "k", "t", "p", "h"]
+_K_MED = ["a", "ae", "ya", "yae", "eo", "e", "yeo", "ye", "o", "wa", "wae", "oe", "yo", "u",
+          "wo", "we", "wi", "yu", "eu", "ui", "i"]
+_K_FIN = ["", "g", "kk", "gs", "n", "nj", "nh", "d", "l", "lg", "lm", "lb", "ls", "lt", "lp",
+          "lh", "m", "b", "bs", "s", "ss", "ng", "j", "ch", "k", "t", "p", "h"]
+_K_DOUBLE = {"gs": ("g", "s"), "nj": ("n", "j"), "nh": ("n", "h"), "lg": ("l", "g"),
+             "lm": ("l", "m"), "lb": ("l", "b"), "ls": ("l", "s"), "lt": ("l", "t"),
+             "lp": ("l", "p"), "lh": ("l", "h"), "bs": ("b", "s")}
+# The seven sounds a final consonant can make: K T P (held, unreleased) and
+# the sonorants N L M NG.
+_K_CLASS = {"g": "K", "kk": "K", "k": "K", "gs": "K", "lg": "K",
+            "n": "N", "nj": "N", "nh": "N",
+            "d": "T", "t": "T", "s": "T", "ss": "T", "j": "T", "ch": "T", "h": "T",
+            "l": "L", "lb": "L", "ls": "L", "lt": "L", "lh": "L",
+            "m": "M", "lm": "M",
+            "b": "P", "p": "P", "bs": "P", "lp": "P",
+            "ng": "NG", "": ""}
+_K_CODA_PH = {"K": "k_}", "T": "t_}", "P": "p_}", "N": "n", "L": "l", "M": "m", "NG": "N"}
+_K_NASALIZE = {"K": "NG", "T": "N", "P": "M"}
+_K_LENIS_OF = {"K": "g", "T": "d", "P": "b"}
+_K_TENSE = {"g": "kk", "d": "tt", "b": "pp", "s": "ss", "j": "jj"}
+_K_ASP = {"g": "k", "d": "t", "b": "p", "j": "ch"}
+# a final stop (or double final) before ㅎ: what stays behind, and the
+# aspirate the two make together (축하 -> 추카, 밝히다 -> 발키다, 앉히다 -> 안치다)
+_K_H_ASP = {"g": ("", "k"), "kk": ("", "k"), "k": ("", "k"), "gs": ("", "k"),
+            "lg": ("l", "k"), "d": ("", "t"), "t": ("", "t"), "s": ("", "t"),
+            "ss": ("", "t"), "j": ("", "ch"), "ch": ("", "ch"), "b": ("", "p"),
+            "p": ("", "p"), "bs": ("", "p"), "lb": ("l", "p"), "lt": ("l", "t"),
+            "nj": ("n", "ch")}
+_K_MED_PH = {
+    "a": ([], ["a"]), "ae": ([], ["E"]), "ya": (["j"], ["a"]), "yae": (["j"], ["E"]),
+    "eo": ([], ["7"]), "e": ([], ["e"]), "yeo": (["j"], ["7"]), "ye": (["j"], ["e"]),
+    "o": ([], ["o"]), "wa": (["w"], ["a"]), "wae": (["w"], ["E"]), "oe": (["w"], ["e"]),
+    "yo": (["j"], ["o"]), "u": ([], ["u"]), "wo": (["w"], ["7"]), "we": (["w"], ["e"]),
+    "wi": (["w"], ["i"]), "yu": (["j"], ["u"]), "eu": ([], ["1"]), "ui": ([], ["1", "i"]),
+    "i": ([], ["i"]),
+}
+_K_PALATAL_V = {"i", "ya", "yae", "yeo", "ye", "yo", "yu", "wi", "ui"}   # s -> sh before these
+_K_IY_V = {"i", "ya", "yae", "yeo", "ye", "yo", "yu"}       # ㄴ is inserted before these
+# vowel-less compatibility jamo used as hum syllables: ㅁ ㄴ ㅇ
+_K_JAMO_HUM = {"ㅁ": "m", "ㄴ": "n", "ㅇ": "N"}
+
+# Words that end before a following vowel-initial word, so their final is
+# reduced before it links (못 와 -> 모돠, 첫인상 -> 처딘상, 헛웃음 -> 허두슴);
+# 못 before i/y gets an inserted ㄴ (못 잊어 -> 몬니저).
+_K_WORD_END = set("못첫헛몇")
+# Pairs sung tense although the spelling doesn't show it: compounds and
+# Sino-Korean words common in lyrics, and verbs whose stem ends in ㄴ/ㅁ.
+_K_TENSE_PAIRS = set("""
+별빛 달빛 눈빛 불빛 물빛 봄빛 손길 눈길 발길 물길 산길 밤길 길가 강가 눈가 물가 손가
+봄바 밤바 물결 잠결 꿈결 람결 등불 눈동 발걸 발자 글자 눈짓 손짓 몸짓 손등 발등 손바
+발바 물방 눈사 물소 술잔 길거 산새 절대 열정 실수 일상 일생 열심 갈증 발전 결정 실제
+갈등 출신 활동 발달 열중 절정 몰두 일정 결심 발생 실종 안고 감고 품고 참고 참지 담고
+남고 넘고 숨고
+""".split())
+# After the future/adnominal ending -(으)ㄹ the next consonant is tense:
+# 할 거야 -> 할꺼야, 기다릴게 -> 기다릴께, 할 수 -> 할쑤, 할 줄 알아 -> 할쭐 알아
+_K_L_DEP = set("거것게걸겁수데")
+# verb/adjective stems that take -을 (잊을 수, 있을 거야, 좋을 텐데)
+_K_EUL_STEMS = set("잊있없같좋많받먹찾웃믿닿놓넣앉맞잡씻벗읽싫않낫짓잃찮들걸")
+# 의: word-initial in these (너의 의미), plain [이] inside these words
+_K_UI_START = {"의미", "의지", "의자", "의사", "의심", "의문", "의무", "의견", "의식", "의도",
+               "의존", "의리", "의외", "의논", "의상", "의욕", "의아", "의젓", "의원", "의학"}
+_K_UI_INNER = {"거의", "주의", "예의", "정의", "동의", "회의", "합의", "강의", "논의", "협의",
+               "결의", "모의", "호의", "성의", "편의", "임의", "의의", "창의", "건의", "토의",
+               "고의", "열의", "문의", "본의", "선의", "악의"}
+
+
+def _is_hangul(c: str) -> bool:
+    return "가" <= c <= "힣"
+
+
+def has_hangul(text: str) -> bool:
+    return any(_is_hangul(c) or c in _K_JAMO_HUM for c in text)
+
+
+def hangul_syllables(text: str) -> list[list[str]]:
+    """Hangul syllables of text as [initial, medial, final] spellings."""
+    out = []
+    for ch in text:
+        o = ord(ch) - 0xAC00
+        if 0 <= o < 11172:
+            out.append([_K_INI[o // 588], _K_MED[(o % 588) // 28], _K_FIN[o % 28]])
+    return out
+
+
+def _k_compose(ini: str, med: str, fin: str) -> str:
+    try:
+        return chr(0xAC00 + (_K_INI.index(ini) * 21 + _K_MED.index(med)) * 28 + _K_FIN.index(fin))
+    except ValueError:
+        return "?"
+
+
+# Revised Romanization (plus a few common informal spellings)
+_RR_INI = [("kk", "kk"), ("tt", "tt"), ("pp", "pp"), ("ss", "ss"), ("jj", "jj"), ("ch", "ch"),
+           ("sh", "s"), ("g", "g"), ("k", "k"), ("n", "n"), ("d", "d"), ("t", "t"),
+           ("r", "r"), ("l", "r"), ("m", "m"), ("b", "b"), ("p", "p"), ("s", "s"),
+           ("j", "j"), ("h", "h"), ("", "")]
+_RR_MED = [("yae", "yae"), ("yeo", "yeo"), ("wae", "wae"), ("ae", "ae"), ("ya", "ya"),
+           ("eo", "eo"), ("ye", "ye"), ("wa", "wa"), ("oe", "oe"), ("yo", "yo"), ("wo", "wo"),
+           ("we", "we"), ("wi", "wi"), ("yu", "yu"), ("eu", "eu"), ("ui", "ui"), ("a", "a"),
+           ("e", "e"), ("o", "o"), ("u", "u"), ("i", "i")]
+_RR_FIN = [("ng", "ng"), ("kk", "kk"), ("k", "g"), ("g", "g"), ("n", "n"), ("t", "d"),
+           ("d", "d"), ("l", "l"), ("m", "m"), ("p", "b"), ("b", "b"), ("ss", "ss"),
+           ("s", "s"), ("ch", "ch"), ("j", "j"), ("", "")]
+# vocables that should never be read as romanized Korean.  In romanization
+# an h or w is always followed by a vowel, so "dah", "uh", "aw" are vocables
+# while "gomawo", "guhae", "ohae" are Korean.
+_KO_VOCABLE = re.compile(r"(oo|ee|aa|(ah|oh|uh|eh)(?![aeiouwy])|aw(?![aeiouy])|ow$|^[^aeiouy]+$)")
+_KO_VOCABLE_SET = {"dum", "dun", "bum", "bun", "um", "hum", "bop", "bob", "dit", "dat", "dut",
+                   "dop", "dap", "dot", "doot"}
+# common one-syllable English words that romanization would misread
+_KO_ENGLISH = {"me", "we", "be", "he", "she"}
+
+
+def _ko_vocable(t: str) -> bool:
+    return t in _KO_VOCABLE_SET or bool(_KO_VOCABLE.search(t))
+
+
+def _ko_english(t: str) -> bool:
+    """An English word in romanized-Korean lyrics: a dictionary word that
+    romanization would have to split into several syllables ("time",
+    "you", "rain"), or a short word romanization misreads."""
+    if t in _KO_ENGLISH:
+        return True
+    if t not in _cmu_dict():
+        return False
+    r = rr_syllables(t)
+    return r is None or len(r) >= 2
+
+
+def rr_syllables(tok: str) -> list[list[str]] | None:
+    """Split a romanized Korean token ("saranghae", "neol", "kkum") into
+    [initial, medial, final] spellings, or None if it isn't one.  Between
+    vowels, consonants go to the following syllable where they can, except
+    that ng stays a final (sarangi = 사랑이); "maeum" is 마음, not 매움."""
+    tok = tok.lower()
+    if not tok or not re.fullmatch(r"[a-z]+", tok):
+        return None
+
+    @lru_cache(maxsize=None)
+    def best(i: int):
+        if i == len(tok):
+            return (0, ())
+        found = None
+        for isp, ini in _RR_INI:
+            if not tok.startswith(isp, i):
+                continue
+            j = i + len(isp)
+            for msp, med in _RR_MED:
+                if not tok.startswith(msp, j):
+                    continue
+                k = j + len(msp)
+                for fsp, fin in _RR_FIN:
+                    if not tok.startswith(fsp, k):
+                        continue
+                    m = k + len(fsp)
+                    rest = best(m)
+                    if rest is None:
+                        continue
+                    cost = rest[0] + 1
+                    if m < len(tok):
+                        cost += 2 * (1 if fsp == "ng" else len(fsp))
+                    if med in ("ae", "oe") and not fsp and tok.startswith("u", k):
+                        cost += 1
+                    if found is None or cost < found[0]:
+                        found = (cost, ((ini, med, fin),) + rest[1])
+        return found
+
+    r = best(0)
+    return [list(s) for s in r[1]] if r else None
+
+
+def korean_sounds(sylls: list[list[str]], links: list[bool], hums: set | None = None) -> list:
+    """Standard Korean pronunciation across a sung line.
+
+    sylls: [initial, medial, final] spellings; links[i] is True when syllable
+    i runs straight into i+1 (no rest or breath between).  Applies linking
+    of finals into a following vowel (음악 -> 으막, 없어 -> 업써), h-deletion
+    and aspiration (좋아 -> 조아, 좋다 -> 조타, 축하 -> 추카), nasalization
+    (합니다 -> 함니다), ㄹ rules (신라 -> 실라, 종로 -> 종노), tensing after
+    stops and after the -ㄹ ending (학교 -> 학꾜, 할 거야 -> 할꺼야),
+    palatalization (같이 -> 가치) and the common lexical cases.  Returns one
+    (onset, nucleus, coda) phoneme triple per syllable.  hums: indices of
+    syllables sung as a hum (음, 흠, 응)."""
+    S = [list(s) for s in sylls]
+    n = len(S)
+    chars = [_k_compose(*s) for s in S]
+    orig_ini = [s[0] for s in S]
+    orig_fin = [s[2] for s in S]
+    hums = hums or set()
+    sung = [bool(links[i]) for i in range(n)]          # sound continues into i+1
+    links = [sung[i] and i not in hums and (i + 1) not in hums for i in range(n)]
+    fincls = [""] * n
+
+    def adnominal_l(i):
+        c0, c1 = chars[i], chars[i + 1]
+        if c0 == "를":
+            return False
+        if c0 == "을" and not (i > 0 and sung[i - 1] and
+                              (chars[i - 1] in _K_EUL_STEMS or orig_fin[i - 1] == "ss")):
+            return False
+        if c1 in _K_L_DEP:
+            return True
+        if c1 == "줄" and i + 2 < n and chars[i + 2] in ("알", "몰"):
+            return True
+        return (c1 == "지" and c0 != "날" and i + 2 < n
+                and chars[i + 2] in ("도", "는", "몰", "모", "라", "요", "만"))
+
+    for i in range(n):
+        F = S[i][2]
+        if not (i + 1 < n and links[i]):
+            fincls[i] = _K_CLASS.get(F, "")
+            continue
+        nx = S[i + 1]
+        c0, c1 = chars[i], chars[i + 1]
+        if nx[0] == "" and F:
+            cls = _K_CLASS.get(F, "")
+            if c0 == "못" and nx[1] in _K_IY_V:
+                nx[0] = "n"                          # 못 잊어 -> 몬니저
+            elif ((c0 in _K_WORD_END and not (c0 == "몇" and nx[1] == "i")) or c1 == "없") \
+                    and cls in _K_LENIS_OF:
+                # a word ends here: the final is reduced, then links
+                S[i][2] = ""
+                nx[0] = _K_LENIS_OF[cls]
+                continue
+            elif c1 == "잎":
+                nx[0] = "n"                          # 꽃잎 -> 꼰닙, 나뭇잎 -> 나문닙
+        I = nx[0]
+        if I == "":
+            # a final runs into a following vowel
+            if F in ("", "ng"):
+                pass
+            elif F == "h":
+                F = ""
+            elif F in ("nh", "lh"):
+                nx[0] = "n" if F == "nh" else "r"
+                F = ""
+            elif F in _K_DOUBLE:
+                F, second = _K_DOUBLE[F]
+                nx[0] = "ss" if second == "s" else second
+            else:
+                nx[0] = "r" if F == "l" else F
+                F = ""
+            # palatalization: 굳이 -> 구지, 같이 -> 가치, 붙여 -> 부처
+            if orig_fin[i] in ("d", "t", "lt") and nx[1] in ("i", "yeo") and nx[0] in ("d", "t"):
+                nx[0] = "j" if nx[0] == "d" else "ch"
+            S[i][2] = F
+            fincls[i] = _K_CLASS.get(F, "")
+            continue
+        # final + consonant
+        if F in ("h", "nh", "lh") and (I in _K_ASP or I == "s"):
+            nx[0] = _K_ASP.get(I, "ss")
+            F = {"h": "", "nh": "n", "lh": "l"}[F]
+        elif F == "h" and I == "n":
+            F = "n"
+        elif I == "h" and F in _K_H_ASP:
+            keep, asp = _K_H_ASP[F]
+            if asp in ("t", "ch"):
+                # 닫히다/맞히다 -> 다치다/마치다, but 꽃 한 송이 -> 꼬탄
+                asp = "ch" if nx[1] in ("i", "yeo") else "t"
+            nx[0] = asp
+            F = keep
+        cls = _K_CLASS.get(F, "")
+        if c0 == "밟" and F == "lb":
+            cls = "P"                                # 밟다 -> 밥따, 밟는 -> 밤는
+        I = nx[0]
+        # verb stems ending in a double consonant: 읽고 -> 일꼬, 앉다 -> 안따,
+        # 젊지 -> 점찌, 넓다 -> 널따, 밟다 -> 밥따
+        if F == "lg" and I == "g":
+            cls = "L"
+            nx[0] = "kk"
+        elif F in ("nj", "lm", "lb", "lt") and I in _K_TENSE and c0 not in ("삶", "앎", "여덟"):
+            nx[0] = _K_TENSE[I]
+        I = nx[0]
+        if I == "r":
+            if cls == "L":
+                nx[0] = "l"
+            elif cls == "N":
+                cls, nx[0] = "L", "l"
+            elif cls in ("M", "NG"):
+                nx[0] = "n"
+            elif cls in _K_NASALIZE:
+                cls, nx[0] = _K_NASALIZE[cls], "n"
+        elif I == "n" and cls == "L":
+            nx[0] = "l"
+        elif I in ("n", "m") and cls in _K_NASALIZE:
+            cls = _K_NASALIZE[cls]
+        elif I in _K_TENSE and (cls in _K_NASALIZE or (c0 + c1) in _K_TENSE_PAIRS
+                                or (F == "l" and adnominal_l(i))):
+            nx[0] = _K_TENSE[I]
+        S[i][2] = F
+        fincls[i] = cls
+
+    out = []
+    for i, (I, M, F) in enumerate(S):
+        if i in hums:
+            hum = {"m": "m", "ng": "N", "n": "n"}.get(F, "m")
+            out.append((["h"] if I == "h" else [], [hum], []))
+            continue
+        # after a vowel, a sonorant or a hum, a lenis consonant is voiced
+        after_voiced = (i > 0 and sung[i - 1]
+                        and ((i - 1) in hums or fincls[i - 1] not in ("K", "T", "P")))
+        glide, nuc = _K_MED_PH[M]
+        glide, nuc = list(glide), list(nuc)
+        if I in ("j", "jj", "ch") and glide == ["j"]:
+            glide = []                      # 져 = 저
+        if M == "ui":
+            if orig_ini[i]:
+                nuc = ["i"]                                     # 희망 -> 히망
+            elif not (i > 0 and sung[i - 1]):
+                pass                                            # 의사: [의]
+            elif i + 1 < n and chars[i] + chars[i + 1] in _K_UI_START:
+                pass                                            # 너의 의미
+            elif i > 0 and chars[i - 1] + chars[i] in _K_UI_INNER:
+                nuc = ["i"]                                     # 거의, 주의
+            else:
+                nuc = ["e"]                                     # 나의 -> 나에
+        if I in ("g", "d", "b", "j"):
+            onset = [({"g": "g", "d": "d", "b": "b", "j": "dZ"} if after_voiced
+                      else {"g": "k", "d": "t", "b": "p", "j": "tS"})[I]]
+        elif I in ("kk", "tt", "pp", "jj"):
+            onset = [{"kk": "k'", "tt": "t'", "pp": "p'", "jj": "tS'"}[I]]
+        elif I in ("k", "t", "p", "ch"):
+            onset = [{"k": "kh", "t": "th", "p": "ph", "ch": "tSh"}[I]]
+        elif I in ("s", "ss"):
+            onset = [("S" if M in _K_PALATAL_V else "s") + ("'" if I == "ss" else "")]
+        else:
+            onset = {"": [], "h": ["h"], "n": ["n"], "m": ["m"], "r": ["R"], "l": ["l"]}[I]
+        coda = [_K_CODA_PH[fincls[i]]] if fincls[i] else []
+        out.append((onset + glide, nuc, coda))
+    return out
+
+
+def _korean_piece_sylls(piece: str, romanized: bool) -> tuple[list, bool]:
+    """Syllable spellings for one lyric piece, and whether it is a hum
+    (음, 흠, 응, 음음, 으음 ...)."""
+    txt = piece.strip()
+    if any(_is_hangul(c) for c in txt):
+        sylls = hangul_syllables(txt)
+    elif any(c in _K_JAMO_HUM for c in txt):
+        fin = {"m": "m", "n": "n", "N": "ng"}[_K_JAMO_HUM[[c for c in txt if c in _K_JAMO_HUM][0]]]
+        return [["", "eu", fin]], True
+    elif romanized:
+        sylls = rr_syllables(_norm(txt)) or []
+    else:
+        return [], False
+    humlike = (bool(sylls) and all(s[1] == "eu" and s[0] in ("", "h") and s[2] in ("", "m", "ng")
+                                   for s in sylls)
+               and any(s[2] in ("m", "ng") for s in sylls))
+    if humlike:
+        last = [s for s in sylls if s[2] in ("m", "ng")][-1]
+        return [[sylls[0][0], "eu", last[2]]], True
+    return sylls, False
+
+
+def looks_romanized_korean(tokens, words=None) -> bool:
+    """Latin lyrics that are clearly romanized Korean: a good share of the
+    words have the romanization vowels 'eo'/'eu' (neo, geu, eo-di, ...),
+    which neither English nor Japanese romaji uses, and most of the words
+    parse as Korean syllables.  words: the lyric words as lists of their
+    hyphenated pieces; pieces of an English word ("peo-ple") don't count."""
+    english = set()
+    for w in words or []:
+        if len(w) > 1 and _norm("".join(w)) in _cmu_dict():
+            english.update(_norm(p) for p in w)
     toks = {_norm(t) for t in tokens if t}
+    toks = {t for t in toks if t and re.fullmatch(r"[a-z]+", t) and t not in english}
+    words = {t for t in toks if not _ko_vocable(t)}
+    if not words:
+        return False
+    ko = {t for t in words if rr_syllables(t) is not None and not _ko_english(t)}
+    marked = {t for t in ko if re.search(r"eo|eu", t)}
+    return len(marked) >= 3 and len(marked) >= 0.1 * len(words) and len(ko) >= 0.6 * len(words)
+
+
+def detect_language(tokens, words=None) -> str:
+    """'ko' for Hangul, 'ja' for kana or Latin lyrics that look like
+    Japanese romaji, 'zh' for Chinese characters, 'ko-rom' for romanized
+    Korean, else 'en'.  words (optional): lyric words as lists of pieces."""
+    tokens = [t for t in tokens if t]
+    toks = {_norm(t) for t in tokens}
     ja = {t for t in toks if t in _JA_MARKERS}
-    if any(classify(t) == "kana" for t in tokens if t):
+    if any(classify(t) == "hangul" for t in tokens):
+        return "ko"
+    if any(classify(t) == "kana" for t in tokens):
         return "ja"
-    if any(classify(t) == "cjk" for t in tokens if t):
+    if any(classify(t) == "cjk" for t in tokens):
         return "zh"
+    # romanized Korean shares many syllables with romaji (ri, mu, jo, ne...),
+    # so it is tested first, on the vowels only it uses
+    if looks_romanized_korean(tokens, words):
+        return "ko-rom"
     return "ja" if len(ja) >= 5 else "en"
 
 
@@ -559,6 +954,8 @@ def _is_kana(c: str) -> bool:
 
 
 def classify(text: str) -> str:
+    if has_hangul(text):
+        return "hangul"
     if any(_is_kana(c) for c in text):
         return "kana"
     if any(_is_cjk(c) for c in text):
@@ -594,7 +991,7 @@ class Phonemizer:
     """Stateful so it can collect warnings and know the score's language."""
 
     def __init__(self, lang: str = "en"):
-        self.lang = lang  # en | zh | ja
+        self.lang = lang  # en | zh | ja | ko (Hangul) | ko-rom (romanized Korean)
         self.warnings: list[str] = []
         self._warned: set[str] = set()
 
@@ -602,6 +999,66 @@ class Phonemizer:
         if msg not in self._warned:
             self._warned.add(msg)
             self.warnings.append(msg)
+
+    # ----------------------------------------------------------- Korean
+    def is_korean(self, text: str) -> bool:
+        """Hangul always is; Latin is read as romanized Korean only in a
+        romanized-Korean score, and never when it looks like a vocable."""
+        if not text:
+            return False
+        if has_hangul(text):
+            return True
+        if self.lang == "ko-rom":
+            t = _norm(text)
+            return (bool(t) and not _ko_vocable(t) and not _ko_english(t)
+                    and rr_syllables(t) is not None)
+        return False
+
+    def korean_line(self, pieces: list[str], links: list[bool]) -> list:
+        """Phonemize a run of Korean lyric pieces (one per note).  links[k]
+        says whether piece k runs straight into piece k+1; Korean sound
+        changes apply across those joins, as they do when it is sung.
+        Returns a Syllable (or Multi, for several syllables under one note)
+        per piece."""
+        romanized = self.lang == "ko-rom"
+        parsed = []
+        for p in pieces:
+            sylls, hum = _korean_piece_sylls(p, romanized)
+            if not sylls:
+                self._warn(f"couldn't read Korean lyric '{p}'; sung on 'ah'")
+                sylls, hum = [["", "a", ""]], False
+            parsed.append((sylls, hum))
+        # 음/흠/응 is a hum unless it is part of a word: run on from a
+        # syllable (마음, 처음, 웃음), linked into a following vowel (음악), or,
+        # in a line without other clear hums, run into a consonant (음식).
+        n = len(pieces)
+        cand = [h for _s, h in parsed]
+
+        def open_vowel(k):        # 아, 오, 우, 이...: a vocable, not a word start
+            sy = parsed[k][0]
+            return not cand[k] and len(sy) == 1 and sy[0][0] == "" and sy[0][2] == ""
+
+        alone_before = [k == 0 or not links[k - 1] or cand[k - 1] or open_vowel(k - 1)
+                        for k in range(n)]
+        into_vowel = [bool(links[k]) and k + 1 < n and not cand[k + 1]
+                      and parsed[k + 1][0][0][0] == "" for k in range(n)]
+        ends = [not links[k] or k + 1 >= n or cand[k + 1] for k in range(n)]
+        backing = sum(1 for k in range(n) if cand[k] and alone_before[k] and ends[k]) >= 2
+        hum_piece = [cand[k] and alone_before[k] and not into_vowel[k] and (backing or ends[k])
+                     for k in range(n)]
+        flat, owner, flat_links, hums = [], [], [], set()
+        for k, (sylls, _h) in enumerate(parsed):
+            for j, s in enumerate(sylls):
+                if hum_piece[k]:
+                    hums.add(len(flat))
+                flat.append(s)
+                owner.append(k)
+                flat_links.append(True if j + 1 < len(sylls) else bool(links[k]))
+        sounds = korean_sounds(flat, flat_links, hums)
+        out: list = [[] for _ in pieces]
+        for k, s in zip(owner, sounds):
+            out[k].append(s)
+        return [ss[0] if len(ss) == 1 else Multi(ss) for ss in out]
 
     def word(self, pieces: list[str]) -> list[Syllable]:
         """Phonemize one lyric word given as its syllable pieces
@@ -613,6 +1070,8 @@ class Phonemizer:
         joined = "".join(pieces)
         kind = classify(joined)
 
+        if kind == "hangul" or (self.lang == "ko-rom" and all(self.is_korean(p) for p in pieces)):
+            return self.korean_line(pieces, [True] * (n - 1) + [False])
         if kind in ("cjk", "kana"):
             return [self._east_asian_piece(p) for p in pieces]
 
@@ -838,3 +1297,10 @@ if __name__ == "__main__":
     print([ph.word([c]) for c in "跳楼机"])
     print(j.word(["かえ", "ろう"]), j.word(["きょ"]))
     print(ph.warnings, j.warnings)
+    k = Phonemizer("ko")
+    for line in ("사랑해", "음악", "없어", "좋아", "좋다", "학교", "합니다", "신라", "같이", "축하해",
+                 "밖에", "나의", "희망", "많아", "읽어", "종로", "국물", "꿈", "쌀", "짜증", "음"):
+        print(line, k.korean_line(list(line), [True] * (len(line) - 1) + [False]))
+    r = Phonemizer("ko-rom")
+    for t in ("saranghae", "neol", "bogo", "sipeo", "eotteoke", "hamkke", "kkum", "doo", "dm"):
+        print(t, rr_syllables(t), r.is_korean(t))

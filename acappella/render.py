@@ -17,7 +17,8 @@ from .synth import CR, SR, Singer
 
 PREROLL = 0.35
 TAIL = 2.5
-LANG_NAMES = {"en": "English", "ja": "Japanese romaji/kana", "zh": "Chinese"}
+LANG_NAMES = {"en": "English", "ja": "Japanese romaji/kana", "zh": "Chinese",
+              "ko": "Korean (Hangul)", "ko-rom": "Korean (romanized)"}
 
 
 def _parse_map(items, cast=str):
@@ -261,8 +262,9 @@ def main(argv=None):
     p.add_argument("--measures", help="render only these measures, e.g. 17-32")
     p.add_argument("--bpm", type=float, help="override the starting tempo (quarter = BPM)")
     p.add_argument("--tempo-scale", type=float, default=1.0, help="e.g. 0.8 for 80%% speed")
-    p.add_argument("--lang", default="auto", choices=["auto", "en", "ja", "zh"],
-                   help="how to read Latin-letter lyrics (auto-detected by default)")
+    p.add_argument("--lang", default="auto", choices=["auto", "en", "ja", "zh", "ko"],
+                   help="how to read Latin-letter lyrics (auto-detected by default); "
+                        "ko reads romanized Korean")
     p.add_argument("--voice", action="append", metavar="PART=TYPE",
                    help="set a part's voice: soprano, mezzo-soprano, alto, tenor, baritone, bass")
     p.add_argument("--gain", action="append", metavar="PART=DB", help="adjust a part's level")

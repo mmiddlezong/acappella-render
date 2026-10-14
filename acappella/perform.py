@@ -8,7 +8,7 @@ from fractions import Fraction as F
 
 import numpy as np
 
-from .phonemes import Multi, Phonemizer, SONORANT_LIKE, detect_language
+from .phonemes import Multi, Phonemizer, SONORANT_LIKE, detect_language, has_hangul
 from .score import Score, Staff, TimeMap
 from .synth import CR, SungNote, Unit
 
@@ -39,6 +39,7 @@ class Item:
     syl: tuple | None = None
     extra: list = field(default_factory=list)   # more syllables on the same note
     sim: bool = False
+    korean: bool = False
 
     @property
     def end(self):
@@ -105,8 +106,43 @@ def _merge_ties(items: list[Item]) -> list[Item]:
     return out
 
 
-def _assign_syllables(items: list[Item], phon: Phonemizer, warnings: list):
+def _assign_korean(items: list[Item], phon: Phonemizer, breaths) -> None:
+    """Korean lyrics are usually entered one syllable per note, without
+    word hyphens, and Korean pronunciation changes across syllables (음악 is
+    sung 으-막).  So Korean pieces are read as one running line: each piece
+    links to the next unless a rest, a breath mark or staccato separates
+    them."""
+    idx = [k for k, it in enumerate(items) if it.lyric and phon.is_korean(it.lyric.strip())]
+    if not idx:
+        return
+    bset = list(breaths)
+    links = []
+    for a, b in zip(idx, idx[1:]):
+        # another (non-Korean) lyric in between breaks the run
+        ok = not any(items[j].lyric and re.search(r"\w", items[j].lyric) for j in range(a + 1, b))
+        for k in range(a, b):
+            if not ok:
+                break
+            x, y = items[k], items[k + 1]
+            if (y.start - x.end > EPS or x.staccato < 0.9
+                    or any(abs(x.end - bb) <= F(1, 32) for bb in bset)):
+                ok = False
+                break
+        links.append(ok)
+    links.append(False)
+    sylls = phon.korean_line([items[k].lyric.strip() for k in idx], links)
+    for k, s in zip(idx, sylls):
+        it = items[k]
+        it.korean = True
+        if isinstance(s, Multi):
+            it.syl, it.extra = s[0], list(s[1:])
+        else:
+            it.syl = s
+
+
+def _assign_syllables(items: list[Item], phon: Phonemizer, warnings: list, breaths=()):
     """Phonemize lyrics word by word, then fill in simile passages."""
+    _assign_korean(items, phon, breaths)
     word: list[Item] = []
 
     def flush():
@@ -121,7 +157,7 @@ def _assign_syllables(items: list[Item], phon: Phonemizer, warnings: list):
         word.clear()
 
     for it in items:
-        if not it.lyric:
+        if not it.lyric or it.korean:
             continue
         txt = it.lyric.strip()
         if SIM_RE.match(txt):
@@ -313,12 +349,38 @@ def voice_kind(staff: Staff, items) -> str:
     return "baritone"
 
 
+def _lyric_words(score: Score) -> list:
+    """Lyric words as lists of their hyphenated pieces (for language
+    detection)."""
+    words = []
+    for st in score.staves:
+        cur: list = []
+        for ev in sorted(st.events, key=lambda e: (e.voice, e.start)):
+            if not ev.lyric:
+                continue
+            sy = (ev.syllabic or "single").lower()
+            if sy in ("single", "begin") and cur:
+                words.append(cur)
+                cur = []
+            cur.append(ev.lyric)
+            if sy in ("single", "end"):
+                words.append(cur)
+                cur = []
+        if cur:
+            words.append(cur)
+    return words
+
+
 def plan(score: Score, tm: TimeMap, offset: float, lang: str, n_frames: int):
     """Returns (lines, gains, warnings, phonemizer)."""
     warnings = list(score.warnings)
+    toks = [ev.lyric for st in score.staves for ev in st.events if ev.lyric]
     if lang == "auto":
-        toks = [ev.lyric for st in score.staves for ev in st.events if ev.lyric]
-        lang = detect_language(toks)
+        lang = detect_language(toks, _lyric_words(score))
+    if lang in ("ko", "ko-rom"):
+        # Hangul lyrics: Latin ones are vocables/English.  No Hangul at all:
+        # Latin lyrics are romanized Korean.
+        lang = "ko" if any(has_hangul(t) for t in toks) else "ko-rom"
     phon = Phonemizer(lang)
     out = []
     for st in score.staves:
@@ -330,7 +392,7 @@ def plan(score: Score, tm: TimeMap, offset: float, lang: str, n_frames: int):
         gain, accents = gain_curve(st, tm, n_frames, offset)
         for name, items in _lines_for_staff(st):
             items = _merge_ties(items)
-            _assign_syllables(items, phon, warnings)
+            _assign_syllables(items, phon, warnings, st.breaths)
             units = _units_for_line(items, tm, st.breaths, offset, warnings, name)
             for t, db in accents:
                 for u in units:
