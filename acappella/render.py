@@ -209,7 +209,7 @@ def render_score(path, out=None, bpm=None, tempo_scale=1.0, lang="auto", voices=
                 lines[k] = (st, name, sorted(units + hits, key=lambda u: u.t_on),
                             gain)                        # so --report shows it too
                 solo_names.append(f"{name} ({n_words})")
-        vib = (28.0 if is_solo else 12.0) * vibrato
+        vib = (16.0 if is_solo else 6.0) * vibrato
         seed = zlib.crc32(name.encode()) & 0xFFFF
         # backing parts are sung by a small section: each singer is a little
         # different (timing, tuning, vibrato, vocal tract), which is most of

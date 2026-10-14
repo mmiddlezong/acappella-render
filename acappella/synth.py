@@ -877,15 +877,15 @@ class Singer:
                 d0, start = a + 0.06, 0.5 * prev_depth
                 d1 = d0 + 0.18
             else:
-                d0, start = a + float(np.clip(0.1 + 0.2 * nl, 0.15, 0.32)), 0.0
-                d1 = d0 + float(np.clip(0.3 * nl, 0.15, 0.4))
+                d0, start = a + float(np.clip(0.2 + 0.2 * nl, 0.28, 0.45)), 0.0
+                d1 = d0 + float(np.clip(0.35 * nl, 0.2, 0.5))
             held = b - d0
-            if held < 0.22:
+            if held < 0.3:
                 # not enough time for a couple of full cycles: a lone wobble
                 # sounds like a wrong pitch, so stay straight
                 prev_depth = 0.0
                 continue
-            depth *= float(np.clip((held - 0.22) / 0.3 + 0.5, 0.5, 1.0))
+            depth *= float(np.clip((held - 0.3) / 0.4 + 0.4, 0.4, 1.0))
             d1 = min(d1, b)
             self.vib[self._span(a, d0)] = start
             self._rcos(self.vib, d0, d1, start, depth)
@@ -1093,7 +1093,7 @@ class Singer:
         rate = np.interp(fpos, idx, _hann_smooth(self.vrate, 150))
         rate = rate * (1 + 0.04 * np.sin(2 * np.pi * 0.23 * ts + self.rng.uniform(0, 6)))
         vphase = np.cumsum(2 * np.pi * rate / SR) + self.rng.uniform(0, 2 * np.pi)
-        drift = self._lf_noise(N, 1.2) * 5.0 + self._lf_noise(N, 4.0) * 2.5   # cents
+        drift = self._lf_noise(N, 1.2) * 5.0 + self._lf_noise(N, 4.0) * 1.5   # cents
         jitter = self._lf_noise(N, 60.0) * 3.0
         cents = vib_s * np.sin(vphase) + cents_s + drift + jitter
         f0 = 440.0 * 2 ** ((midi_s - 69 + cents / 100.0) / 12)
