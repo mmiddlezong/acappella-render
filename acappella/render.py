@@ -106,6 +106,7 @@ def _loudness(y):
 
 
 def _write_audio(path: Path, stereo: np.ndarray, bitrate=192):
+    stereo = np.nan_to_num(stereo, nan=0.0, posinf=0.0, neginf=0.0)
     if path.suffix.lower() == ".wav":
         from scipy.io import wavfile
         wavfile.write(str(path), SR, (np.clip(stereo, -1, 1) * 32767).astype(np.int16))
@@ -168,6 +169,7 @@ def render_score(path, out=None, bpm=None, tempo_scale=1.0, lang="auto", voices=
     solo = [f.lower() for f in (solo or [])]
     neutral_syl = _neutral_syllable(neutral) if neutral else None
     solo_names = []
+    air_warn = []
     mute = [f.lower() for f in (mute or [])]
 
     staff_names = []
@@ -220,7 +222,15 @@ def render_score(path, out=None, bpm=None, tempo_scale=1.0, lang="auto", voices=
                             formant_shift=1.0 + 0.0125 * spread,
                             detune_cents=3.0 * spread)
             singer.sing(units, gain_db=gain)
-            voices_out.append((spread, singer.render(gain)[:N]))
+            if s == 0:
+                for w in singer.air_warnings:
+                    air_warn.append((name, gain) + tuple(w))
+            ys = singer.render(gain)[:N]
+            bad = ~np.isfinite(ys)
+            if bad.any():           # never let one bad sample ruin the file
+                ys = np.where(bad, 0.0, ys)
+                warnings.append(f"{name}: {int(bad.sum())} invalid samples silenced (please report)")
+            voices_out.append((spread, ys))
         y = np.sum([v for _s, v in voices_out], axis=0)
         # every part is calibrated to the same loudness at 'f' (0 dB); the
         # dynamics curve already applied inside render() sets the real level
@@ -269,6 +279,23 @@ def render_score(path, out=None, bpm=None, tempo_scale=1.0, lang="auto", voices=
         for name, kind, nu, ns in rendered:
             who = f"  x{ns} singers" if ns > 1 else ""
             print(f"  {name:22s} {kind:14s} {nu:4d} syllables{who}")
+        if air_warn:
+            mstarts = [(no, tm.sec(pos) + offset) for no, pos, _ln in score.measures]
+
+            def where(t):
+                no = mstarts[0][0]
+                for n2, t2 in mstarts:
+                    if t2 <= t + 1e-6:
+                        no = n2
+                return no
+
+            from .perform import DYN_DB
+            for name, gain, t_start, t_out, short in air_warn:
+                lvl = float(gain[min(len(gain) - 1, int(t_out * CR))])
+                dyn = min(("pp", "p", "mp", "mf", "f", "ff"), key=lambda k: abs(DYN_DB[k] - lvl))
+                print(f"  breath: {name} runs out of air in m.{where(t_out)} and is short about "
+                      f"{short:.1f}s of singing at {dyn} before it can refill (last real breath "
+                      f"m.{where(t_start)}); add a breath mark or a rest")
         if neutral_syl:
             if solo_names:
                 print(f"  lyric words sung on '{neutral}': " + ", ".join(solo_names))

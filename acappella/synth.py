@@ -156,6 +156,7 @@ class SungNote:
     midi: float
     gliss: bool = False
     nucleus: str | None = None     # sonorant sung on this note ('l' in "fu-l")
+    breath_after: bool = False     # a breath mark is written after this note
 
 
 @dataclass
@@ -308,12 +309,14 @@ class Singer:
         self.bloom = np.ones(n)         # 0 = voice just opening (darker), 1 = open
         self.fric: list[tuple] = []     # (t0, t1, fc, bw, amp, attack, release)
         self.dips: list[tuple] = []     # (t_center, width, depth)
-        self.breath_ev: list[tuple] = []  # (t0, t1, amp)
+        self.breath_ev: list[tuple] = []  # (t0, t1, amp, brightness)
         self.pplan: list[tuple] = []    # pitch targets (t, midi, T, zeta, reset, scoop)
         self.gain = None
         self.units: list[Unit] = []
         self.mid_pitch = 60.0
         self._reset_idx = None
+        self.air_end = 1.0
+        self.air_warnings: list[tuple] = []     # (phrase start, runs out at, seconds short)
 
     # ---------------------------------------------------------- helpers
     def _i(self, t: float) -> int:
@@ -931,24 +934,113 @@ class Singer:
         return out
 
     # --------------------------------------------------------- breaths
+    def _air_rate(self, t: float, u: Unit | None = None) -> float:
+        """Fraction of a full breath used per second of singing: a full
+        breath lasts about 20 s at mf, 14 s at f, 10 s at ff, 30 s at pp.
+        A hum uses less air than an open vowel."""
+        r = 0.05 * 10 ** (0.6 * (self._gain_at(t) + 5.0) / 20.0)
+        if u is not None and not any(p in VOWEL_F for p in u.nucleus):
+            r *= 0.6
+        return r
+
     def _plan_breaths(self, units: list[Unit]):
-        """A breath in before each phrase that has room for one."""
-        if self.breaths <= 0:
+        """Breaths from a running model of the singer's air.
+
+        Air (0..1 of a full breath) drains while singing, faster when loud,
+        and is refilled in the gaps.  Before each phrase the singer takes in
+        what the stretch ahead needs plus a reserve (and tops up more when
+        there is time).  The breath's size and the time available set how
+        it sounds: a big refill in a short gap is a quick, loud, hissy gasp;
+        a top-up in a long rest is slow and quiet.  Short gaps get a quick
+        catch breath when the singer is getting low; a breath mark always
+        gets a breath.  Stretches that still run out of air are recorded in
+        air_warnings (they don't change the sound)."""
+        self.air_warnings = []
+        if not units:
             return
-        for k, u in enumerate(units):
-            if k and units[k - 1].joined_next:
-                continue
-            prev_end = units[k - 1].eff_off if k else 0.0
-            gap = u.c_start - prev_end
-            if gap < 0.35:
-                continue
-            dur = float(np.clip(0.5 * gap, 0.16, 0.40))
-            t1 = u.c_start - 0.05
-            t0 = max(prev_end + 0.08, t1 - dur, 0.01)
-            if t1 - t0 < 0.12:
-                continue
-            strength = float(np.clip((t1 - t0) / 0.4, 0.5, 1.0))
-            self.breath_ev.append((t0, t1, BREATH_AMP * self.breaths * strength))
+        # phrases: runs of joined units (a breath mark always ends one)
+        phrases, cur = [], [units[0]]
+        for u in units[1:]:
+            if cur[-1].joined_next and not cur[-1].notes[-1].breath_after:
+                cur.append(u)
+            else:
+                phrases.append(cur)
+                cur = [u]
+        phrases.append(cur)
+
+        def need(ph):
+            return sum(self._air_rate(u.c_start, u) * max(0.0, u.eff_off - u.c_start) for u in ph)
+
+        air = 0.6                         # a normal breath in before the piece
+        prev_end = 0.0
+        stretch = None                    # [start, ran out at, seconds short] since the last refill
+        for k, ph in enumerate(phrases):
+            start = ph[0].c_start
+            gap = start - prev_end
+            marked = k > 0 and phrases[k - 1][-1].notes[-1].breath_after
+            ahead = need(ph)
+            for nxt in phrases[k + 1:]:
+                if nxt[0].c_start - ph[-1].eff_off >= 0.5:
+                    break
+                ahead += need(nxt)
+            want = max(0.0, min(1.0, ahead + 0.12) - air)
+            if gap >= 0.7:
+                want = max(want, 0.5 * (1.0 - air))      # a long rest: top up anyway
+            elif gap < 0.3 and not marked and air > 0.45:
+                want = 0.0                               # plenty left: sing on
+            want = min(want, 1.0 - air)
+            room = gap - 0.13
+            if gap < 0.3:
+                # a quick sniff between notes; tighter the lower the singer is
+                room = gap - (0.04 if air < 0.35 else 0.08)
+            if k == 0:
+                room = min(room, 0.5)
+            if marked:
+                # a written breath: the singer makes the time for a real one
+                room = max(room, gap - 0.03, 0.3)
+            taken = 0.0
+            if want >= 0.04 and room >= 0.05:
+                comfy = 0.25 + 0.6 * want                # an unhurried breath this size
+                dur = float(min(room, comfy, 0.9))
+                # how much air fits in the time: about 1.6 breaths/s at most
+                if marked:
+                    taken = min(want, 2.5 * dur)
+                else:
+                    taken = min(want, 1.6 * dur, want * min(1.0, dur / (0.15 + 0.35 * want)))
+                flow = taken / dur
+                t1 = start - (min(0.05, max(0.0, 0.3 * gap)) if marked else min(0.05, 0.4 * gap))
+                t0 = max((prev_end - 0.05) if marked else (prev_end + min(0.06, 0.3 * gap)),
+                         t1 - dur, 0.01)
+                if t1 - t0 >= 0.04 and taken > 0.02:
+                    if self.breaths > 0:
+                        amp = BREATH_AMP * self.breaths * float(np.clip((flow / 0.9) ** 0.7, 0.25, 2.2))
+                        bright = float(np.clip((flow - 0.8) / 1.6, 0.0, 1.0))
+                        self.breath_ev.append((t0, t1, amp, bright))
+                else:
+                    taken = 0.0
+            if (taken >= 0.1 or marked) and stretch is not None:
+                # a refill ends the stretch that ran dry
+                if stretch[2] >= 0.75:
+                    self.air_warnings.append(tuple(stretch))
+                stretch = None
+            if taken >= 0.3 or marked or k == 0:
+                stretch_start = start             # the last real breath
+            air = max(0.0, air) + taken
+            # sing the phrase
+            for u in ph:
+                d = max(0.0, u.eff_off - u.c_start)
+                rate = self._air_rate(u.c_start, u)
+                if air - rate * d < 0.0:
+                    short = (rate * d - max(0.0, air)) / rate
+                    if stretch is None:
+                        stretch = [stretch_start, u.c_start + max(0.0, air) / rate, 0.0]
+                    stretch[2] += short
+                air -= rate * d
+            air = max(0.0, air)
+            prev_end = ph[-1].eff_off
+        if stretch is not None and stretch[2] >= 0.75:
+            self.air_warnings.append(tuple(stretch))
+        self.air_end = air
 
     # -------------------------------------------------------- rendering
     def render(self, gain_db: np.ndarray) -> np.ndarray:
@@ -1201,7 +1293,7 @@ class Singer:
 
     def _breath_noise(self, N):
         out = np.zeros(N)
-        for (t0, t1, amp) in self.breath_ev:
+        for (t0, t1, amp, bright) in self.breath_ev:
             a, b = max(0, int(t0 * SR)), min(N, int(t1 * SR))
             L = b - a
             if L < 64:
@@ -1209,11 +1301,16 @@ class Singer:
             nz = self.rng.standard_normal(L + 512)
             lo = sosfilt(_BREATH_LO, nz)[512:]
             hi = sosfilt(_BREATH_HI, nz)[512:]
-            sig = lo / (np.sqrt(np.mean(lo ** 2)) + 1e-9) + 0.55 * hi / (np.sqrt(np.mean(hi ** 2)) + 1e-9)
+            # a gasp has more high hiss (narrower, faster airflow)
+            sig = lo / (np.sqrt(np.mean(lo ** 2)) + 1e-9) + \
+                (0.5 + 0.9 * bright) * hi / (np.sqrt(np.mean(hi ** 2)) + 1e-9)
             sig /= np.sqrt(np.mean(sig ** 2)) + 1e-9
+            # airflow rises then tails off; a gasp peaks earlier and stops harder
             x = np.linspace(0, 1, L)
-            env = np.where(x < 0.6, np.sin(0.5 * np.pi * x / 0.6) ** 2,
-                           np.cos(0.5 * np.pi * (x - 0.6) / 0.4) ** 2)
+            pk = 0.6 - 0.25 * bright
+            env = np.where(x < pk, np.sin(0.5 * np.pi * x / pk) ** 2,
+                           np.clip(np.cos(0.5 * np.pi * (x - pk) / (1 - pk)), 0.0, 1.0) ** (2 - bright))
+            env *= 1.0 + 0.15 * self._lf_noise(L, 12.0)        # turbulence flutter
             out[a:b] += sig * env * amp * FRIC_GAIN
         return out
 

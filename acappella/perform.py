@@ -208,9 +208,11 @@ def _units_for_line(items: list[Item], tm: TimeMap, breaths: list, offset: float
         t0 = tm.sec(it.start) + offset
         t_end = tm.sec(it.end) + offset
         t1 = t0 + (t_end - t0) * it.staccato
-        if any(abs(it.end - b) <= F(1, 32) for b in breath_set):
+        marked = any(abs(it.end - b) <= F(1, 32) for b in breath_set)
+        if marked:
             t1 -= min(0.15, 0.25 * (t1 - t0))
-        note = SungNote(t0=t0, t1=max(t0 + 0.02, t1), midi=it.pitch, gliss=it.gliss)
+        note = SungNote(t0=t0, t1=max(t0 + 0.02, t1), midi=it.pitch, gliss=it.gliss,
+                        breath_after=marked)
         contiguous = cur is not None and cur_end is not None and abs(it.start - cur_end) <= EPS \
             and cur.notes[-1].t1 >= t0 - 0.03
         prev_legato = k > 0 and items[k - 1].legato
@@ -267,6 +269,7 @@ def _units_for_line(items: list[Item], tm: TimeMap, breaths: list, offset: float
                            legato_in=True, word=it.word)
                 units.append(cur)
             cur.notes[-1].t1 = max(t1, cur.notes[-1].t0 + 0.02)
+            cur.notes[-1].breath_after = marked
     if resung:
         warnings.append(f"{name}: {resung} lyric-less notes after a rest re-sing the previous syllable")
     return units
