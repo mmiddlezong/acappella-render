@@ -42,7 +42,7 @@ named Voice/Solo/Lead: one singer, more vibrato, +2 dB.
 
 Other options: `--bpm 128`, `--tempo-scale 0.8`, `--gain "Bass=+3"`,
 `--voice "Voice=tenor"` (the solo part's voice type is guessed from its
-range), `--reverb 0` (dry), `--vibrato 0` (straight tone),
+range), `--reverb 0` (dry), `--vibrato 0` (straight tone; 2 = twice as much),
 `--lang ja|en|zh|ko`, `-o out.wav`. Part names match by prefix and ignore case.
 
 How human it sounds:
@@ -60,8 +60,10 @@ Input: `.mscz` / `.mscx` directly (MuseScore 3 and 4), or MusicXML.
 
 **Syllables**
 - A cappella vocables use their a cappella sound: *doo, dah, dn, dm, bm, jn,
-  hoo, woh, loo, doot, dat, bahm, ding*. "dah" is "ah", not the
-  dictionary's "duh".
+  hoo, woh, loo, doot, dat, bap, bahm, ding*. "dah", "bap" and "dat" get the
+  round, dark "ah" backing singers use, not the dictionary's "duh" or the
+  "a" of "cat", and open vocables are sung a little warmer than lyrics so
+  they blend.
 - English words use the CMU pronouncing dictionary. Your phonetic splits
   work: "wi-ll", "bu-t", "beau-ti-fu-l" sing the consonant on the note it's
   under. "chi-i-ild" holds the vowel and closes to "ld" on the last note.
@@ -80,8 +82,13 @@ Input: `.mscz` / `.mscx` directly (MuseScore 3 and 4), or MusicXML.
 - Romanized Korean (*saranghae*, *neo-reul*, *bo-go si-peo*) is detected
   too, or force it with `--lang ko`.
 - Chinese characters are read through pinyin.
-- A lone "d" or "t" is a short ghost hit. X-noteheads are short, soft ghost
-  notes.
+- A lone "d" or "t" is a short ghost hit.
+- X-noteheads are vocal percussion. With no lyric they're a snare; a lyric
+  picks the sound: *b, boom, kick* = kick drum, *ts, tss, ch* = hi-hat,
+  *k, pf, psh* = snare. The hit follows the part's dynamics and accents,
+  and the singing stops for it (the next lyric-less note is re-sung, not
+  slurred through). An x-notehead with any other lyric is a short, soft
+  ghost note on that syllable.
 - "(sim.)" repeats the previous bar's syllable pattern beat for beat until
   the next lyric.
 - A note with no lyric continues the previous syllable (melisma). After a
@@ -122,10 +129,14 @@ Input: `.mscz` / `.mscx` directly (MuseScore 3 and 4), or MusicXML.
 - **Pitch** moves like a voice: each note is approached with a little lag
   and overshoot, most of the move happens during the consonant so the vowel
   arrives in tune, phrases start a touch flat and settle, and long releases
-  sag slightly. Vibrato fades in on held notes and never jumps.
+  sag slightly.
+- **Vibrato** is light: backing parts are nearly straight tone and the solo
+  has a gentle vibrato. It only comes in on notes long enough to hold
+  (about 0.6 s or more), starts late and fades in. `--vibrato 2` doubles it,
+  `--vibrato 0` turns it off.
 - **Sections**: each backing part is two singers, slightly different in
   timing, tuning, vibrato and voice, panned a little apart. The solo part is
-  always one singer.
+  always one singer. Percussion hits are one per part, not one per singer.
 - **Breaths** come from a running model of each singer's air: it drains
   while they sing (faster when loud) and refills in the gaps. Before a
   phrase they take in what the stretch ahead needs plus a reserve, topping
@@ -137,7 +148,8 @@ Input: `.mscz` / `.mscx` directly (MuseScore 3 and 4), or MusicXML.
 ## Limits
 - It sounds synthetic. Judge syllables, rhythm, dynamics and balance, not
   tone.
-- Percussion staves are skipped. Repeats and voltas are followed, but
+- Percussion (drum) staves are skipped; write vocal percussion with
+  x-noteheads on the singer's own staff. Repeats and voltas are followed, but
   D.S./D.C./Coda jumps aren't. Only verse 1 lyrics are used.
 - Korean lyrics don't mark word boundaries, so sound changes that depend on
   them are approximated (못 잊어, 꽃잎 and the common lyric words are
