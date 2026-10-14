@@ -83,12 +83,15 @@ Input: `.mscz` / `.mscx` directly (MuseScore 3 and 4), or MusicXML.
   too, or force it with `--lang ko`.
 - Chinese characters are read through pinyin.
 - A lone "d" or "t" is a short ghost hit.
-- X-noteheads are vocal percussion. With no lyric they're a snare; a lyric
-  picks the sound: *b, boom, kick* = kick drum, *ts, tss, ch* = hi-hat,
-  *k, pf, psh* = snare. The hit follows the part's dynamics and accents,
-  and the singing stops for it (the next lyric-less note is re-sung, not
-  slurred through). An x-notehead with any other lyric is a short, soft
-  ghost note on that syllable.
+- X-noteheads are vocal percussion, made with the mouth the way a
+  beatboxer would. With no lyric they're a snare (a "pf"/"psh"); a lyric
+  picks the sound: *b, boom, kick* = kick, *ts, tss, ch* = hi-hat,
+  *k, pf, psh* = snare. The hit follows the part's dynamics and accents.
+  The singer can't make a hit and sing at once, so the hit's tail stops
+  before the next sung note's consonant, no breath is taken during it,
+  and the next lyric-less note is re-sung rather than slurred through.
+  An x-notehead with any other lyric is a short, soft ghost note on that
+  syllable.
 - "(sim.)" repeats the previous bar's syllable pattern beat for beat until
   the next lyric.
 - A note with no lyric continues the previous syllable (melisma). After a

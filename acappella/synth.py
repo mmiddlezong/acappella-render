@@ -316,6 +316,7 @@ class Singer:
         self.gain = None
         self.units: list[Unit] = []
         self.mid_pitch = 60.0
+        self.busy = []
         self._reset_idx = None
         self.air_end = 1.0
         self.air_warnings: list[tuple] = []     # (phrase start, runs out at, seconds short)
@@ -582,6 +583,8 @@ class Singer:
 
     # -------------------------------------------------------- writing
     def sing(self, units: list[Unit], gain_db: np.ndarray | None = None):
+        # mouth percussion hits: no breath can be taken while making one
+        self.busy = sorted((u.t_on - 0.01, u.t_on + 0.12) for u in units if u.perc)
         units = copy.deepcopy([u for u in units if not u.perc])
         self.gain = gain_db
         pitches = [nt.midi for u in units for nt in u.notes]
@@ -1019,6 +1022,13 @@ class Singer:
                 t1 = start - (min(0.05, max(0.0, 0.3 * gap)) if marked else min(0.05, 0.4 * gap))
                 t0 = max((prev_end - 0.05) if marked else (prev_end + min(0.06, 0.3 * gap)),
                          t1 - dur, 0.01)
+                t0_free = t0
+                for b0, b1 in self.busy:
+                    if b0 < t1 and b1 > t0:          # wait until the hit is done
+                        t0 = max(t0, b1)
+                if t0 > t0_free and t1 > t0:
+                    taken *= (t1 - t0) / (t1 - t0_free)
+                    flow = taken / (t1 - t0)
                 if t1 - t0 >= 0.04 and taken > 0.02:
                     if self.breaths > 0:
                         amp = BREATH_AMP * self.breaths * float(np.clip((flow / 0.9) ** 0.7, 0.25, 2.2))

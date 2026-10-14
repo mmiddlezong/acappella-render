@@ -262,7 +262,13 @@ def render_score(path, out=None, bpm=None, tempo_scale=1.0, lang="auto", voices=
             stem[:len(y)] += y
         if hits:
             # vocal percussion (x-noteheads): one track per part, not per singer
-            yp = render_hits(hits, gain, N, seed=seed + 31, humanize=humanize)
+            until = []
+            for h in hits:
+                nxt = next((u for u in units if u.t_on > h.t_on + 0.005), None)
+                # silent again just before the next sung syllable's consonant
+                until.append(None if nxt is None else
+                             nxt.t_on - sum(Singer.cons_dur(c) for c in nxt.onset) - 0.012)
+            yp = render_hits(hits, gain, N, seed=seed + 31, humanize=humanize, until=until)
             yp *= 10 ** (part_db / 20.0)
             place(yp, pan0)
             stem += yp
