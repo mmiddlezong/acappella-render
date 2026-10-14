@@ -224,6 +224,8 @@ def render_score(path, out=None, bpm=None, tempo_scale=1.0, lang="auto", voices=
     if not quiet:
         print(f"{score.title}: {total - PREROLL - TAIL:.1f}s of music, "
               f"rendered in {time.time() - t_start:.1f}s -> {out}")
+        saved = time.strftime("%Y-%m-%d %H:%M", time.localtime(path.stat().st_mtime))
+        print(f"  score file: {path.resolve()} (last saved {saved})")
         print(f"  lyrics read as: {LANG_NAMES.get(lang_used, lang_used)}")
         for name, kind, nu, ns in rendered:
             who = f"  x{ns} singers" if ns > 1 else ""
