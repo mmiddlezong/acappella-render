@@ -79,9 +79,9 @@ SONORANT_F = {
 NASAL_ZERO = {"m": 1050, "n": 1650, "N": 2600}
 STOP = {
     #      voiced  closure burst_fc burst_bw burst_amp burst_len aspiration
-    "b": (True, 0.040, 1200, 1800, 0.10, 0.006, 0.0),
-    "d": (True, 0.035, 4000, 3000, 0.22, 0.008, 0.0),
-    "g": (True, 0.040, 2000, 1200, 0.25, 0.012, 0.0),
+    "b": (True, 0.040, 1200, 1800, 0.20, 0.006, 0.0),
+    "d": (True, 0.035, 3800, 3600, 0.42, 0.008, 0.0),
+    "g": (True, 0.040, 2000, 1200, 0.34, 0.012, 0.0),
     "p": (False, 0.045, 1200, 2000, 0.25, 0.008, 0.040),
     "t": (False, 0.040, 4500, 3500, 0.40, 0.010, 0.040),
     "k": (False, 0.045, 2200, 1500, 0.40, 0.014, 0.045),
@@ -129,6 +129,11 @@ VOICED_CONS = set(SONORANT_F) | {"b", "d", "g", "z", "Z", "v", "D", "dZ", "dz"}
 ASP_LEVEL = (0.24, 0.10)
 # Stop bursts are short; sung, they sit well under the vowel
 BURST_GAIN = 0.16
+# ...except a b/d/g starting a syllable, which has no aspiration to carry it:
+# its release click is what makes "doo"/"dah" sound like a d and not an n.
+# Backing vocables are sung percussively, like an instrument; words less so.
+ONSET_BURST_VOICED = 2.5
+VOCABLE_BURST_VOICED = 5.0
 
 # Formant smoothing half-widths in ms: how quickly the vocal tract moves
 W_VOWEL = 16      # out of a consonant into a vowel (~35 ms transition)
@@ -399,13 +404,15 @@ class Singer:
         return 0.04
 
     # ------------------------------------------------- consonant writers
-    def _burst(self, t, c, amp_scale=1.0):
+    def _burst(self, t, c, amp_scale=1.0, onset=False, crisp=False):
         voiced, clo, fc, bw, amp, blen, asp = STOP[c]
         fc = fc * (1.1 if self.fs > 1.08 else 1.0)
-        g = BURST_GAIN * (0.65 if voiced else 1.0)
-        self.fric.append((t, t + blen + 0.004, fc, bw, amp * amp_scale * g, 0.0015, blen))
+        g = BURST_GAIN
+        if voiced and onset:
+            g *= VOCABLE_BURST_VOICED if crisp else ONSET_BURST_VOICED
+        self.fric.append((t, t + blen + 0.004, fc, bw, amp * amp_scale * g, 0.0008, blen))
 
-    def _onset_cons(self, c, a, b, vowel, after_silence=False):
+    def _onset_cons(self, c, a, b, vowel, after_silence=False, crisp=False):
         """Write consonant c occupying [a, b) before a vowel."""
         d = b - a
         c = UNRELEASED.get(c, c)
@@ -423,7 +430,7 @@ class Singer:
             else:
                 self.AV[sl] = 0.0
             self.AH[sl] = 0.0
-            self._burst(tb, c)
+            self._burst(tb, c, onset=True, crisp=crisp)
             if asp:
                 self._set_formants(tb, b, self._vowel(vowel))
                 self.AV[self._span(tb, b)] = 0.0
@@ -617,7 +624,8 @@ class Singer:
         t = u.c_start
         for k, c in enumerate(u.onset):
             d = self.cons_dur(c) * u.c_scale
-            self._onset_cons(c, t, t + d, ref_vowel, after_silence=(k == 0 and not joined_in))
+            self._onset_cons(c, t, t + d, ref_vowel, after_silence=(k == 0 and not joined_in),
+                             crisp=not u.word)
             t += d
         t_on = max(u.t_on, t)
         off = u.eff_off
@@ -759,7 +767,7 @@ class Singer:
         # out of a consonant
         base = UNRELEASED.get(last, last)
         if base in STOP:
-            att = 0.009 if STOP[base][0] else 0.015    # a stop releases crisply
+            att = 0.006 if STOP[base][0] else 0.015    # a stop releases crisply
         elif base in AFFRIC:
             att = 0.012 if STOP[AFFRIC[base][0]][0] else 0.018
         elif base in FRIC or base in ("h", "x"):
@@ -774,8 +782,11 @@ class Singer:
         att = min(att, 0.5 * room)
         v0 = min(target, float(self.AV[max(0, i_on - 1)]))
         self._rcos(self.AV, t_on, t_on + att, v0, target)
-        b0 = 0.55 if base in STOP or base in AFFRIC else 0.35 + 0.65 * v0 / target
+        b0 = 0.85 if base in STOP or base in AFFRIC else 0.35 + 0.65 * v0 / target
         self._rcos(self.bloom, t_on, t_on + att, b0, 1.0)
+        if base in STOP or base in AFFRIC:
+            # the tongue/lips spring open: the vowel's formants arrive quickly
+            self.SW[self._span(t_on, t_on + 0.025)] = 8
         # aspiration / breathy noise fades under the vowel instead of stopping
         h0 = float(self.AH[max(0, i_on - 1)])
         if h0 > 0:
@@ -1131,7 +1142,10 @@ class Singer:
 
         y = self._cascade(x, AV_s, AH_s)
         y = sosfilt(_PRESENCE, y)
-        y += self._frication(N)
+        # the voiced sound is louder on higher voices and every part is later
+        # matched in loudness, so consonant noise follows the voice's own
+        # level: a soprano's d and s are as clear as a bass's
+        y += self._frication(N) * 10 ** (0.27 * (self.mid_pitch - 55.0) / 20.0)
         y += self._breath_noise(N)
         y *= 10 ** (lvl / 20.0)
         return y.astype(np.float32)

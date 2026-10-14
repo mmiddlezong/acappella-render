@@ -126,9 +126,12 @@ Input: `.mscz` / `.mscx` directly (MuseScore 3 and 4), or MusicXML.
   little air; out of a consonant the vowel rises over 30–60 ms; the tone
   starts darker and brightens as it opens. Tense consonants (Korean) and
   accents get quicker attacks. `--attack` scales all of it.
-- **Consonants** sit under the vowel: stop bursts and aspiration are short
-  and quiet, a sung d/b/g between vowels is a quick voiced tap, and the
+- **Consonants** sit under the vowel: aspiration is short and quiet, and the
   tongue and lips move quickly into a consonant and more slowly out of it.
+  A d/b/g starting a syllable is a voiced closure that springs open with a
+  click: crisp and percussive on backing vocables (doo, dah, dn), lighter
+  in lyric words. Consonants are scaled to each voice, so a soprano's "d"
+  is as clear against her vowel as a bass's.
 - **Pitch** moves like a voice: each note is approached with a little lag
   and overshoot, most of the move happens during the consonant so the vowel
   arrives in tune, phrases start a touch flat and settle, and long releases
