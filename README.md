@@ -2,9 +2,11 @@
 
 Turns a MuseScore arrangement into an MP3 where every part actually **sings
 its syllables**, follows the **dynamics and hairpins**, and **cuts off where
-the notes and rests say**. It's a formant synthesizer, so it sounds like a
-clear synthetic choir, not real singers. The point is to hear what your
-syllable choices, dynamics and cutoffs do.
+the notes and rests say**. It's a formant synthesizer, so it still sounds
+like a synthetic choir rather than real singers, but it phrases like a
+singer: attacks swell in instead of switching on, pitch glides between
+notes, and each backing part is sung by a small section. The point is to
+hear what your syllable choices, dynamics and cutoffs do.
 
 ## Setup (once)
 
@@ -25,12 +27,32 @@ python render.py song.mscz --focus Alto                # practice mix: alto up, 
 python render.py song.mscz --only Tenor --only Bass    # just some parts
 python render.py song.mscz --stems                     # also one MP3 per part
 python render.py song.mscz --report                    # print what each part sings
+python render.py song.mscz --neutral                   # every lyric word sung on "ah"
+python render.py song.mscz --neutral loo               # ...or on any syllable
 ```
+
+`--neutral` swaps every lyric word (pinyin, Hangul, kana, English words), in
+whichever part sings it, for one neutral syllable, keeping notes, rhythm,
+slurs and dynamics. Vocables (doo, dm, dn, duh, oh, bap, 음…) are left as
+written. Syllables that are both (da, ba, wo, 다…) count as words only inside
+a phrase that has other words in it.
+
+`--solo PART` (repeatable) says which part is the soloist when it isn't
+named Voice/Solo/Lead: one singer, more vibrato, +2 dB.
 
 Other options: `--bpm 128`, `--tempo-scale 0.8`, `--gain "Bass=+3"`,
 `--voice "Voice=tenor"` (the solo part's voice type is guessed from its
 range), `--reverb 0` (dry), `--vibrato 0` (straight tone),
-`--lang ja|en|zh`, `-o out.wav`. Part names match by prefix and ignore case.
+`--lang ja|en|zh|ko`, `-o out.wav`. Part names match by prefix and ignore case.
+
+How human it sounds:
+
+```
+--singers 2      singers on each backing part (default 2; 1 = one voice per part, 3+ = choir)
+--attack 1       attack softness (0.5 = crisper, 2 = very soft)
+--humanize 1     timing/tuning scatter (0 = exactly on the grid and in tune)
+--breaths 1      breaths before phrases (0 = none)
+```
 
 Input: `.mscz` / `.mscx` directly (MuseScore 3 and 4), or MusicXML.
 
@@ -48,6 +70,15 @@ Input: `.mscz` / `.mscx` directly (MuseScore 3 and 4), or MusicXML.
   *te* is "teh", *u* is unrounded, *rou* is a long o, *kasu* devoices to
   "kas", and several morae under one note share it. Kanji can't be read,
   so use kana or romaji.
+- Korean Hangul is read as Korean, auto-detected. Enter it the usual way,
+  one syllable per note; pronunciation carries across notes the way it's
+  sung: 음악 is "eu-mak", 없어 "eop-sseo", 좋아 "jo-a", 같이 "ga-chi",
+  학교 has a tense k, 할 거야 / 기다릴게 tense the k. Final consonants are
+  held, not popped. A rest or breath mark ends the run. 음, 흠, 응 on their
+  own are hums; inside a word (마음, 처음) they're sung as written. Latin
+  vocables (doo, dm) in a Korean score stay vocables.
+- Romanized Korean (*saranghae*, *neo-reul*, *bo-go si-peo*) is detected
+  too, or force it with `--lang ko`.
 - Chinese characters are read through pinyin.
 - A lone "d" or "t" is a short ghost hit. X-noteheads are short, soft ghost
   notes.
@@ -58,25 +89,58 @@ Input: `.mscz` / `.mscx` directly (MuseScore 3 and 4), or MusicXML.
 
 **Timing and cutoffs**
 - Each vowel lands on the beat. Onset consonants come just before it, taking
-  time from the previous note (at most half of it).
-- Sound stops at the written end of the note. A final stop consonant
-  ("doot", "dat") releases on the cutoff.
+  time from the previous note (at most half of it). A vowel out of silence
+  starts swelling a hair before the beat so it arrives on it.
+- Sound stops at the written end of the note, with a short fade into the
+  cutoff rather than a hard stop. A final stop consonant ("doot", "dat")
+  releases on the cutoff.
+- Singers are a few milliseconds early or late and a few cents off, like
+  people. `--humanize 0` puts everything exactly on the grid.
 - Staccato sings half the length, staccatissimo 30%. Breath marks shorten
   the note before them. Fermatas stretch time. Ties merge. Slurs and
   melismas are legato.
 
 **Dynamics**
 - ppp to fff are about 5–6 dB apart, and voice quality follows: soft is
-  breathier, loud is brighter.
+  breathier, loud is brighter. Higher notes come out a little brighter and
+  louder, lower ones a little darker.
 - A hairpin ramps to the dynamic written at its end. A hairpin with no
   ending dynamic moves about one step and holds until the next marking,
   never drifting far from the last written one. sfz/fp work. Accents and
-  marcato add punch.
+  marcato add punch (a faster, harder attack).
 - Every part is calibrated to the same loudness at a given dynamic, so the
   balance you hear comes from your markings. The solo part gets +2 dB.
+
+## How it sings
+- **Attacks** swell in. A vowel out of silence gets a soft onset led by a
+  little air; out of a consonant the vowel rises over 30–60 ms; the tone
+  starts darker and brightens as it opens. Tense consonants (Korean) and
+  accents get quicker attacks. `--attack` scales all of it.
+- **Consonants** sit under the vowel: stop bursts and aspiration are short
+  and quiet, a sung d/b/g between vowels is a quick voiced tap, and the
+  tongue and lips move quickly into a consonant and more slowly out of it.
+- **Pitch** moves like a voice: each note is approached with a little lag
+  and overshoot, most of the move happens during the consonant so the vowel
+  arrives in tune, phrases start a touch flat and settle, and long releases
+  sag slightly. Vibrato fades in on held notes and never jumps.
+- **Sections**: each backing part is two singers, slightly different in
+  timing, tuning, vibrato and voice, panned a little apart. The solo part is
+  always one singer.
+- **Breaths** come from a running model of each singer's air: it drains
+  while they sing (faster when loud) and refills in the gaps. Before a
+  phrase they take in what the stretch ahead needs plus a reserve, topping
+  up more in long rests. A big refill squeezed into a short gap is a quick,
+  loud, hissy gasp; a top-up in a long rest is slow and quiet; a singer
+  running low snatches a catch breath in a gap that would otherwise go
+  unused. `--breaths 2` makes them louder, `--breaths 0` turns them off.
 
 ## Limits
 - It sounds synthetic. Judge syllables, rhythm, dynamics and balance, not
   tone.
 - Percussion staves are skipped. Repeats and voltas are followed, but
   D.S./D.C./Coda jumps aren't. Only verse 1 lyrics are used.
+- Korean lyrics don't mark word boundaries, so sound changes that depend on
+  them are approximated (못 잊어, 꽃잎 and the common lyric words are
+  handled; rarer compounds may be read a little too literally).
+- A full song with two singers per backing part takes about twice as long
+  to render as with `--singers 1`.
