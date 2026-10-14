@@ -197,6 +197,27 @@ def _assign_syllables(items: list[Item], phon: Phonemizer, warnings: list, breat
             last_syl = it.syl
 
 
+_PERC_WORDS = {
+    "snare": ("snare", "k", "kh", "kch", "ksh", "pf", "pff", "psh", "pss", "kp"),
+    "kick": ("kick", "b", "bf", "boom", "bv"),
+    "hat": ("hat", "hihat", "ts", "tss", "tsk", "tst", "tz", "ss", "ch", "tch"),
+}
+
+
+def _perc_kind(it: Item) -> str:
+    """Vocal percussion: an x-notehead with no lyric is a snare hit, or a
+    kick/hat when the lyric says so ("b", "boom", "ts")."""
+    if not it.ghost:
+        return ""
+    txt = re.sub(r"[^a-z]", "", (it.lyric or "").lower())
+    if not txt:
+        return "snare"
+    for kind, words in _PERC_WORDS.items():
+        if txt in words:
+            return kind
+    return ""
+
+
 def _units_for_line(items: list[Item], tm: TimeMap, breaths: list, offset: float,
                     warnings: list, name: str) -> list[Unit]:
     units: list[Unit] = []
@@ -213,6 +234,13 @@ def _units_for_line(items: list[Item], tm: TimeMap, breaths: list, offset: float
             t1 -= min(0.15, 0.25 * (t1 - t0))
         note = SungNote(t0=t0, t1=max(t0 + 0.02, t1), midi=it.pitch, gliss=it.gliss,
                         breath_after=marked)
+        perc = _perc_kind(it)
+        if perc:
+            # a percussion hit interrupts the singing: the next lyric-less
+            # note re-sings rather than continuing a melisma through it
+            units.append(Unit(onset=[], nucleus=[], coda=[], notes=[note], accent=it.accent,
+                              perc=perc))
+            continue
         contiguous = cur is not None and cur_end is not None and abs(it.start - cur_end) <= EPS \
             and cur.notes[-1].t1 >= t0 - 0.03
         prev_legato = k > 0 and items[k - 1].legato

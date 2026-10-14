@@ -11,6 +11,8 @@ from pathlib import Path
 import numpy as np
 from scipy.signal import butter, oaconvolve, sosfilt
 
+from .perc import REF as PART_REF
+from .perc import render_hits
 from .perform import plan, voice_kind
 from .score import TimeMap, load_score
 from .synth import CR, SR, Singer
@@ -188,7 +190,9 @@ def render_score(path, out=None, bpm=None, tempo_scale=1.0, lang="auto", voices=
         if mute and _match(nm, mute):
             continue
         units = [u for u in units if u.t_on >= PREROLL - 0.05 and u.t_on < total - TAIL + 0.01]
-        if not units:
+        hits = [u for u in units if u.perc]
+        units = [u for u in units if not u.perc]
+        if not units and not hits:
             continue
         kind = voice_kind(st, None)
         key = _match(nm, voices.keys())
@@ -202,14 +206,15 @@ def render_score(path, out=None, bpm=None, tempo_scale=1.0, lang="auto", voices=
             n_words = sum(1 for u in units if u.word)
             if n_words:
                 units = _neutralize(units, neutral_syl)
-                lines[k] = (st, name, units, gain)      # so --report shows it too
+                lines[k] = (st, name, sorted(units + hits, key=lambda u: u.t_on),
+                            gain)                        # so --report shows it too
                 solo_names.append(f"{name} ({n_words})")
         vib = (28.0 if is_solo else 12.0) * vibrato
         seed = zlib.crc32(name.encode()) & 0xFFFF
         # backing parts are sung by a small section: each singer is a little
         # different (timing, tuning, vibrato, vocal tract), which is most of
         # what keeps a held chord from sounding like an organ
-        n_sing = 1 if is_solo else max(1, int(singers))
+        n_sing = (1 if is_solo else max(1, int(singers))) if units else 0
         voices_out = []
         for s in range(n_sing):
             spread = 0.0 if n_sing == 1 else (2.0 * s / (n_sing - 1) - 1.0)    # -1..1
@@ -231,27 +236,37 @@ def render_score(path, out=None, bpm=None, tempo_scale=1.0, lang="auto", voices=
                 ys = np.where(bad, 0.0, ys)
                 warnings.append(f"{name}: {int(bad.sum())} invalid samples silenced (please report)")
             voices_out.append((spread, ys))
-        y = np.sum([v for _s, v in voices_out], axis=0)
-        # every part is calibrated to the same loudness at 'f' (0 dB); the
-        # dynamics curve already applied inside render() sets the real level
-        g = np.interp(np.arange(len(y)) / SR * CR, np.arange(len(gain)), gain)
-        ref = _loudness(y / 10 ** (g / 20.0))
         part_db = gains.get(_match(nm, gains.keys()) or "", 0.0)
         if is_solo:
             part_db += 2.0
         if focus:
             part_db += 4.0 if _match(nm, focus) else -9.0
-        scale = 0.12 / ref * 10 ** (part_db / 20.0)
         pan0 = _pan(staff_names.index(st.name), len(staff_names), st.name, kind)
-        for spread, ys in voices_out:
-            ys = ys * scale
-            pan = float(np.clip(pan0 + 0.12 * spread, -1.0, 1.0))
+        stem = stem_sigs.setdefault(st.name, np.zeros(N))
+
+        def place(ys, pan):
             lg, rg = np.cos((pan + 1) * np.pi / 4), np.sin((pan + 1) * np.pi / 4)
             mix[:len(ys), 0] += ys * lg * np.sqrt(2)
             mix[:len(ys), 1] += ys * rg * np.sqrt(2)
-        y = y * scale
-        stem_sigs.setdefault(st.name, np.zeros(N))[:len(y)] += y
-        rendered.append((name, kind, len(units), n_sing))
+
+        if voices_out:
+            y = np.sum([v for _s, v in voices_out], axis=0)
+            # every part is calibrated to the same loudness at 'f' (0 dB); the
+            # dynamics curve already applied inside render() sets the real level
+            g = np.interp(np.arange(len(y)) / SR * CR, np.arange(len(gain)), gain)
+            ref = _loudness(y / 10 ** (g / 20.0))
+            scale = PART_REF / ref * 10 ** (part_db / 20.0)
+            for spread, ys in voices_out:
+                place(ys * scale, float(np.clip(pan0 + 0.12 * spread, -1.0, 1.0)))
+            y = y * scale
+            stem[:len(y)] += y
+        if hits:
+            # vocal percussion (x-noteheads): one track per part, not per singer
+            yp = render_hits(hits, gain, N, seed=seed + 31, humanize=humanize)
+            yp *= 10 ** (part_db / 20.0)
+            place(yp, pan0)
+            stem += yp
+        rendered.append((name, kind, len(units), n_sing, len(hits)))
 
     if reverb > 0:
         ir = _reverb_ir()
@@ -276,9 +291,10 @@ def render_score(path, out=None, bpm=None, tempo_scale=1.0, lang="auto", voices=
         saved = time.strftime("%Y-%m-%d %H:%M", time.localtime(path.stat().st_mtime))
         print(f"  score file: {path.resolve()} (last saved {saved})")
         print(f"  lyrics read as: {LANG_NAMES.get(lang_used, lang_used)}")
-        for name, kind, nu, ns in rendered:
+        for name, kind, nu, ns, nh in rendered:
             who = f"  x{ns} singers" if ns > 1 else ""
-            print(f"  {name:22s} {kind:14s} {nu:4d} syllables{who}")
+            perc = f"  + {nh} percussion hits" if nh else ""
+            print(f"  {name:22s} {kind:14s} {nu:4d} syllables{who}{perc}")
         if air_warn:
             mstarts = [(no, tm.sec(pos) + offset) for no, pos, _ln in score.measures]
 
@@ -318,7 +334,9 @@ def _report(lines, tm):
         row = []
         for u in [u for u in units if u.t_on >= PREROLL - 0.05][:60]:
             syl = "".join(u.onset) + "·" + "".join(u.nucleus) + "·" + "".join(u.coda)
-            if len(u.notes) > 1:
+            if u.perc:
+                syl = f"[{u.perc}]"
+            elif len(u.notes) > 1:
                 syl += f"~{len(u.notes)}"
             row.append(f"{u.t_on - PREROLL:6.2f}s {syl}")
         for i in range(0, len(row), 6):

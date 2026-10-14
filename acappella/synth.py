@@ -172,6 +172,7 @@ class Unit:
     ghost: bool = False
     legato_in: bool = False
     word: bool = False             # a lyric word (not a vocable like doo/dm)
+    perc: str = ""                 # vocal percussion hit (snare/kick/hat), not sung
     # filled in by the planner
     c_start: float = 0.0
     c_scale: float = 1.0
@@ -581,7 +582,7 @@ class Singer:
 
     # -------------------------------------------------------- writing
     def sing(self, units: list[Unit], gain_db: np.ndarray | None = None):
-        units = copy.deepcopy(units)
+        units = copy.deepcopy([u for u in units if not u.perc])
         self.gain = gain_db
         pitches = [nt.midi for u in units for nt in u.notes]
         self.mid_pitch = float(np.median(pitches)) if pitches else 60.0
