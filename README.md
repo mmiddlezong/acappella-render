@@ -58,6 +58,41 @@ How human it sounds:
 
 Input: `.mscz` / `.mscx` directly (MuseScore 3 and 4), or MusicXML.
 
+## Playing the render inside MuseScore (macOS, MuseScore 4)
+
+A plugin renders the open score with one button, and then MuseScore's own
+playback (Play, the moving cursor, starting from a selected note, loops)
+plays the render instead of MuseScore's sounds.
+
+```
+musescore/install.sh
+```
+
+This builds and installs the "Acappella Render" VST3 effect (it fetches the
+MIT-licensed VST 3 SDK into `musescore/build/` the first time; needs CMake
+and the Xcode command line tools) and the "Acappella Render" MuseScore
+plugin. Then:
+
+1. Quit and reopen MuseScore.
+2. Home > Plugins: enable Acappella Render.
+3. Plugins > Acappella Render > Render. It saves the score, renders it
+   (about 20 s for a 3-minute song) and shows the renderer's notes.
+4. Once per score: in the Mixer, add Acappella Render to the Master
+   channel's Audio FX. Press Play.
+
+Render again after editing; the new render takes over even mid-playback.
+Switch the effect off in the Mixer to hear MuseScore's sounds again. While
+playback is stopped MuseScore's sound passes through, so clicking notes
+still sounds. "Keep MuseScore's own sound underneath" in the dialog mixes it
+in quietly during playback too (handy with the metronome).
+
+The render is timed exactly the way MuseScore times playback (see Tempo
+below), so it stays with the cursor. Keep the playback speed at 100% and repeats on:
+the render doesn't follow MuseScore's speed slider, and D.S./D.C./Coda jumps
+aren't rendered, so playback drifts after the first jump.
+`musescore/install.sh --uninstall` removes the effect and the plugin. Renders
+are kept in `~/Library/Application Support/AcappellaRender/` (the last 3).
+
 ## How it reads your score
 
 **Syllables**
