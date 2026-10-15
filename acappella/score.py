@@ -1,7 +1,9 @@
 """Read MuseScore (.mscz/.mscx) and MusicXML files into a simple timeline.
 
 Positions are Fractions of a whole note, measured along the *playback*
-order (repeats unrolled).  The TimeMap turns them into seconds.
+order (repeats unrolled).  Score.time_map() turns them into seconds: for
+MuseScore files on MuseScore's own tempo map (see musetempo.py), so the render
+lines up with MuseScore's playback.
 """
 from __future__ import annotations
 
@@ -11,6 +13,8 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from fractions import Fraction as F
 from pathlib import Path
+
+from . import musetempo
 
 DUR = {
     "longa": F(4), "long": F(4), "breve": F(2), "whole": F(1), "half": F(1, 2),
@@ -62,6 +66,19 @@ class Score:
     end: F
     warnings: list = field(default_factory=list)
     measures: list = field(default_factory=list)   # (score measure no., play start, length)
+    muse_tempo: object = None    # MuseScore's tempo map and repeat runs (MuseScore files)
+
+    def time_map(self, bpm_override=None, tempo_scale=1.0):
+        """Positions -> seconds.  --bpm and --tempo-scale act like MuseScore's
+        playback speed: they scale the tempo but not pauses."""
+        if self.muse_tempo is None:
+            return TimeMap(self.tempos, self.fermatas, bpm_override=bpm_override,
+                           tempo_scale=tempo_scale)
+        tmap, runs = self.muse_tempo
+        mult = tempo_scale
+        if bpm_override:
+            mult *= bpm_override / 60.0 / tmap.tempo(0)
+        return musetempo.MuseTimeMap(tmap, runs, mult)
 
 
 class TimeMap:
@@ -98,7 +115,7 @@ class TimeMap:
                 r *= fac
         return r
 
-    def sec(self, pos) -> float:
+    def sec(self, pos, before_pause=False) -> float:
         pos = F(pos)
         i = 0
         lo, hi = 0, len(self.pts) - 1
@@ -151,6 +168,38 @@ def _duration(el) -> F:
         d = DUR.get(dt, F(1, 4))
     dots = int(el.findtext("dots") or 0)
     return d * (2 - F(1, 2 ** dots))
+
+
+def _layout_breaks(el, section_pause: float):
+    """(break kinds, section-break pause) of a measure or frame."""
+    kinds, pause = set(), 0.0
+    for lb in el.findall("LayoutBreak"):
+        sub = (lb.findtext("subtype") or "").strip()
+        kinds.add(sub)
+        if sub == "section":
+            pz = lb.findtext("pause")
+            pause = float(pz) if pz else section_pause
+    return kinds, pause
+
+
+def _style_value(path: Path, sc, name: str, default: float) -> float:
+    """A score style setting (score_style.mss in a .mscz, or <Style> in the score)."""
+    found = None
+    st = sc.find("Style")
+    if st is not None:
+        found = st.findtext(name)
+    if found is None and path.suffix.lower() == ".mscz":
+        try:
+            with zipfile.ZipFile(path) as z:
+                mss = [n for n in z.namelist() if n.endswith(".mss") and "/" not in n]
+                if mss:
+                    found = ET.fromstring(z.read(mss[0])).findtext(f"Style/{name}")
+        except (zipfile.BadZipFile, ET.ParseError, KeyError):
+            pass
+    try:
+        return float(found) if found is not None else default
+    except ValueError:
+        return default
 
 
 def _read_mscz(path: Path) -> bytes:
@@ -220,9 +269,21 @@ def load_mscx(path: Path) -> Score:
     # ---- measure grid from the first staff
     timesig = F(1)
     m_len: list[F] = []
+    m_pickup: list[bool] = []        # MuseScore's Measure::isAnacrusis()
+    m_pause_before: list[float] = []  # section-break pause where the measure starts
     start_rep, end_rep, voltas = set(), {}, {}
     jumps = False
-    for mi, m in enumerate(staff_els[0].findall("Measure")):
+    section_pause = _style_value(path, sc, "SectionPause", 3.0)
+    after_break, pending_pause = True, []    # first measure / after a frame or break
+    mi = -1
+    for m in staff_els[0]:
+        if m.tag in ("VBox", "HBox", "TBox", "FBox"):
+            pending_pause.append(_layout_breaks(m, section_pause)[1])
+            after_break = True
+            continue
+        if m.tag != "Measure":
+            continue
+        mi += 1
         for v in m.findall("voice"):
             for e in v:
                 if e.tag == "TimeSig":
@@ -241,6 +302,13 @@ def load_mscx(path: Path) -> Score:
             break  # only voice 1 carries these
         ln = m.get("len")
         m_len.append(_frac(ln) if ln else timesig)
+        irregular = (m.findtext("irregular") or "0").strip() not in ("", "0")
+        m_pickup.append((irregular or after_break) and timesig > m_len[-1])
+        # MuseScore pauses at the earliest section break ending where this starts
+        m_pause_before.append(next((x for x in pending_pause if x), 0.0))
+        kinds, pz = _layout_breaks(m, section_pause)
+        pending_pause = [pz]
+        after_break = bool(kinds & {"line", "page", "section"})
         if m.find("startRepeat") is not None:
             start_rep.add(mi)
         if m.find("endRepeat") is not None:
@@ -297,7 +365,12 @@ def load_mscx(path: Path) -> Score:
         return m_start_score[min(mi, len(m_len))] + rel
 
     tempos: list[tuple] = []
-    fermata_marks: list[tuple] = []   # (mi, rel, factor)
+    fermata_marks: list[tuple] = []   # (mi, rel, time stretch)
+    tempo_marks: list[tuple] = []     # (mi, rel, quarter notes per second, type, follows text)
+    breath_pauses: list[tuple] = []   # (mi, rel, seconds)
+    tempo_lines: list[tuple] = []     # rit./accel.: (mi, rel, (measures, fraction), factor, easing)
+    seg_points: set = set()           # (mi, rel) of notes, rests, breaths, clefs, barlines
+    onset_points: set = set()         # (mi, rel) of notes and rests
     staves: list[Staff] = []
 
     for si, st in enumerate(staff_els):
@@ -330,10 +403,28 @@ def load_mscx(path: Path) -> Score:
                     elif tag == "location":
                         p += _frac(e.findtext("fractions"))
                     elif tag == "Tempo":
+                        if (e.findtext("play") or "1").strip() == "0":
+                            continue
                         try:
-                            tempos.append((mi, p, float(e.findtext("tempo")) * 60.0))
+                            bps = float(e.findtext("tempo"))
                         except (TypeError, ValueError):
-                            pass
+                            bps = musetempo.DEFAULT_TEMPO
+                        tempos.append((mi, p, bps * 60.0))
+                        follow = (e.findtext("followText") or "0").strip() not in ("", "0")
+                        tempo_marks.append((mi, p, bps, (e.findtext("type") or "normal").strip(),
+                                            follow))
+                    elif tag in ("Clef", "KeySig", "TimeSig", "BarLine"):
+                        seg_points.add((mi, p))
+                    elif (tag == "Spanner" and e.get("type") == "GradualTempoChange"
+                          and e.find("GradualTempoChange") is not None):
+                        g = e.find("GradualTempoChange")
+                        loc = _loc(e)
+                        if loc and (g.findtext("play") or "1").strip() != "0":
+                            kind = (g.findtext("tempoChangeType") or "undefined").strip()
+                            fac = g.findtext("tempoChangeFactor")
+                            factor = float(fac) if fac else musetempo.TEMPO_CHANGE_FACTOR.get(kind, 1.0)
+                            easing = (g.findtext("tempoEasingMethod") or "normal").strip()
+                            tempo_lines.append((mi, p, loc, factor, easing))
                     elif tag == "Dynamic":
                         sub = (e.findtext("subtype") or "").strip()
                         for pp in play_positions(mi, p):
@@ -350,10 +441,18 @@ def load_mscx(path: Path) -> Score:
                     elif tag == "Breath":
                         for pp in play_positions(mi, p):
                             staff.breaths.append(pp)
+                        seg_points.add((mi, p))
+                        pz = e.findtext("pause")
+                        if pz:
+                            breath_pauses.append((mi, p, float(pz)))
                     elif tag == "Fermata":
+                        # MuseScore's stretch: as set, or by the fermata's type
+                        if (e.findtext("play") or "1").strip() == "0":
+                            continue
                         ts = e.findtext("timeStretch")
-                        fac = float(ts) if ts else 1.8
-                        fermata_marks.append((mi, p, max(1.0, fac)))
+                        fac = float(ts) if ts else musetempo.fermata_stretch(
+                            e.findtext("subtype") or "fermataAbove")
+                        fermata_marks.append((mi, p, fac))
                     elif tag == "Chord" or tag == "Rest":
                         if tag == "Chord" and any(e.find(g) is not None for g in GRACE_TAGS):
                             continue
@@ -361,6 +460,8 @@ def load_mscx(path: Path) -> Score:
                         if tid is not None and tid.strip() in tup_by_id:
                             scale *= tup_by_id[tid.strip()]
                         d = _duration(e) * scale
+                        seg_points.add((mi, p))
+                        onset_points.add((mi, p))
                         if tag == "Rest":
                             for pp in play_positions(mi, p):
                                 staff.rests.append((pp, d, vi))
@@ -439,6 +540,7 @@ def load_mscx(path: Path) -> Score:
     tempo_pts = sorted(set(tempo_pts))
     ferm: list[tuple] = []
     for mi, p, fac in sorted(set(fermata_marks)):
+        fac = max(1.0, fac)
         for pp in play_positions(mi, p):
             # length of the shortest note/rest starting here in any staff
             d = None
@@ -456,8 +558,61 @@ def load_mscx(path: Path) -> Score:
     for mi in order:
         mlist.append((mi + 1, pos, m_len[mi]))
         pos += m_len[mi]
+    muse = _muse_tempo(m_start_score, m_len, m_pickup, m_pause_before, order, tempo_marks,
+                       fermata_marks, breath_pauses, tempo_lines, seg_points, onset_points)
     return Score(title=title, staves=staves, tempos=tempo_pts, fermatas=ferm, end=total,
-                 warnings=warnings, measures=mlist)
+                 warnings=warnings, measures=mlist, muse_tempo=muse)
+
+
+def _muse_tempo(m_start, m_len, m_pickup, m_pause_before, order, tempo_marks, fermata_marks,
+                breath_pauses, tempo_lines, seg_points, onset_points):
+    """MuseScore's tempo map for this score and the runs of consecutive
+    measures it is played in."""
+    tk = musetempo.ticks
+
+    def tick(mi, rel):
+        return tk(m_start[min(mi, len(m_len))] + rel)
+
+    measures = [(tk(m_start[k]), tk(m_len[k]), m_pickup[k]) for k in range(len(m_len))]
+    onsets = {tick(mi, p) for mi, p in onset_points}
+    marks, seen = [], set()
+    for mi, p, bps, kind, follow in tempo_marks:
+        key = (tick(mi, p), bps, kind, follow)
+        if key not in seen:
+            seen.add(key)
+            bps = min(max(bps, musetempo.MIN_TEMPO), musetempo.MAX_TEMPO)
+            marks.append(musetempo.TempoMark(key[0], bps, kind, follow, key[0] in onsets))
+    fermatas: dict[int, float] = {}
+    for mi, p, fac in fermata_marks:
+        if p < m_len[mi]:                   # one on a barline doesn't stretch time
+            t = tick(mi, p)
+            fermatas[t] = max(fermatas.get(t, 0.0), fac)
+    pauses: dict[int, float] = {}
+    for k, pz in enumerate(m_pause_before):
+        if pz:
+            pauses[measures[k][0]] = pz
+    breath: dict[int, float] = {}
+    for mi, p, pz in breath_pauses:
+        t = tick(mi, p)
+        breath[t] = max(breath.get(t, 0.0), pz)
+    pauses.update({t: pz for t, pz in breath.items() if pz})
+    changes = []
+    for mi, p, loc, factor, easing in tempo_lines:
+        t0 = tick(mi, p)
+        changes.append(musetempo.TempoChange(t0, tick(mi + loc[0], p + loc[1]) - t0, factor, easing))
+    seg_ticks = sorted({tick(mi, p) for mi, p in seg_points} | {s + n for s, n, _ in measures})
+    tmap = musetempo.build_tempo_map(measures, marks, fermatas, pauses, changes, seg_ticks)
+    runs = []
+    pos, prev = F(0), None
+    for mi in order:
+        if runs and mi == prev + 1:
+            u0, t0, n = runs[-1]
+            runs[-1] = (u0, t0, n + measures[mi][1])
+        else:
+            runs.append((pos, measures[mi][0], measures[mi][1]))
+        prev = mi
+        pos += m_len[mi]
+    return tmap, runs
 
 
 # ======================================================================

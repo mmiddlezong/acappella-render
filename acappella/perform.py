@@ -227,7 +227,7 @@ def _units_for_line(items: list[Item], tm: TimeMap, breaths: list, offset: float
     breath_set = set(breaths)
     for k, it in enumerate(items):
         t0 = tm.sec(it.start) + offset
-        t_end = tm.sec(it.end) + offset
+        t_end = tm.sec(it.end, before_pause=True) + offset    # silent through a caesura
         t1 = t0 + (t_end - t0) * it.staccato
         marked = any(abs(it.end - b) <= F(1, 32) for b in breath_set)
         if marked:

@@ -44,6 +44,8 @@ Other options: `--bpm 128`, `--tempo-scale 0.8`, `--gain "Bass=+3"`,
 `--voice "Voice=tenor"` (the solo part's voice type is guessed from its
 range), `--reverb 0` (dry), `--vibrato 0` (straight tone; 2 = twice as much),
 `--lang ja|en|zh|ko`, `-o out.wav`. Part names match by prefix and ignore case.
+`--bpm` and `--tempo-scale` work like MuseScore's playback speed: every
+tempo scales, pauses don't.
 
 How human it sounds:
 
@@ -107,8 +109,24 @@ Input: `.mscz` / `.mscx` directly (MuseScore 3 and 4), or MusicXML.
 - Singers are a few milliseconds early or late and a few cents off, like
   people. `--humanize 0` puts everything exactly on the grid.
 - Staccato sings half the length, staccatissimo 30%. Breath marks shorten
-  the note before them. Fermatas stretch time. Ties merge. Slurs and
-  melismas are legato.
+  the note before them. Ties merge. Slurs and melismas are legato.
+
+**Tempo** (MuseScore files are timed the way MuseScore 4 plays them, to
+within a fraction of a millisecond, so the MP3 lines up with MuseScore's
+playback of the same score)
+- Tempo marks, including "a tempo" and "tempo primo" ones. Before the first
+  tempo mark it's 120 BPM, as in MuseScore; a pickup takes the tempo marked
+  in the bar after it.
+- rit., rall., accel. and the other tempo-change lines change the tempo by
+  their factor (rit./rall. 0.75, accel. 1.33, stringendo 1.5, ..., or the one
+  you set) along their easing curve, in the same steps MuseScore uses. The
+  new tempo holds after the line until the next tempo mark ("a tempo").
+- A fermata stretches the time to the next note in any part by its type's
+  factor (normal ×2, short ×1.5, very short ×1.25, long ×3, very long ×4)
+  or the time stretch you set. "Play" turned off in Properties is respected.
+- A breath mark or caesura with a pause (Properties > Pause) adds that
+  much silence; the note before it stops at the mark. Section breaks pause
+  3 s (or what they're set to) before the next bar.
 
 **Dynamics**
 - ppp to fff are about 5–6 dB apart, and voice quality follows: soft is
@@ -154,6 +172,8 @@ Input: `.mscz` / `.mscx` directly (MuseScore 3 and 4), or MusicXML.
 ## Limits
 - It sounds synthetic. Judge syllables, rhythm, dynamics and balance, not
   tone.
+- Swing (a "Swing" staff text or the score's swing setting) isn't played:
+  MuseScore delays the off-beat eighths, the render keeps them straight.
 - Percussion (drum) staves are skipped; write vocal percussion with
   x-noteheads on the singer's own staff. Repeats and voltas are followed, but
   D.S./D.C./Coda jumps aren't. Only verse 1 lyrics are used.

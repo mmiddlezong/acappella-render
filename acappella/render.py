@@ -14,7 +14,7 @@ from scipy.signal import butter, oaconvolve, sosfilt
 from .perc import REF as PART_REF
 from .perc import render_hits
 from .perform import plan, voice_kind
-from .score import TimeMap, load_score
+from .score import load_score
 from .synth import CR, SR, Singer
 
 PREROLL = 0.35
@@ -143,7 +143,7 @@ def render_score(path, out=None, bpm=None, tempo_scale=1.0, lang="auto", voices=
     t_start = time.time()
     path = Path(path)
     score = load_score(path)
-    tm = TimeMap(score.tempos, score.fermatas, bpm_override=bpm, tempo_scale=tempo_scale)
+    tm = score.time_map(bpm_override=bpm, tempo_scale=tempo_scale)
 
     # excerpt window
     win0, win1 = F(0), score.end
