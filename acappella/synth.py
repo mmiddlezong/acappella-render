@@ -22,6 +22,7 @@ off:
 from __future__ import annotations
 
 import copy
+from functools import lru_cache
 from dataclasses import dataclass
 
 import numpy as np
@@ -1105,7 +1106,8 @@ class Singer:
         opening = _hann_smooth(self.bloom, 8)       # how far the voice has opened
         AV = AV * self._level_comp(f0_ctrl, AV)
 
-        # --- sample-rate tracks
+        # --- sample-rate tracks (each full-length array is dropped once it's
+        # last used: a voice is long, and several are rendered at once)
         ts = np.arange(N) / SR
         fpos = ts * CR
         midi_s = np.interp(fpos, idx, midi)
@@ -1113,11 +1115,15 @@ class Singer:
         cents_s = np.interp(fpos, idx, _hann_smooth(self.cents, 10))
         rate = np.interp(fpos, idx, _hann_smooth(self.vrate, 150))
         rate = rate * (1 + 0.04 * np.sin(2 * np.pi * 0.23 * ts + self.rng.uniform(0, 6)))
+        del ts
         vphase = np.cumsum(2 * np.pi * rate / SR) + self.rng.uniform(0, 2 * np.pi)
+        del rate
         drift = self._lf_noise(N, 1.2) * 5.0 + self._lf_noise(N, 4.0) * 1.5   # cents
         jitter = self._lf_noise(N, 60.0) * 3.0
         cents = vib_s * np.sin(vphase) + cents_s + drift + jitter
+        del vib_s, vphase, cents_s, drift, jitter
         f0 = 440.0 * 2 ** ((midi_s - 69 + cents / 100.0) / 12)
+        del midi_s, cents
         phase = np.cumsum(f0 / SR) % 1.0
 
         AV_s = np.interp(fpos, idx, AV)
@@ -1132,15 +1138,21 @@ class Singer:
         # blooms as the voice opens: darker at the very start of a note
         q = np.clip((lvl + 22) / 26, 0, 1)
         q = np.clip(q - 0.45 * (1.0 - open_s) + np.interp(fpos, idx, self.qoff + 0.008 * dp), 0, 1)
+        del open_s, fpos
         glot = self._glottal(phase, f0, q)
+        del f0
         shimmer = 1 + 0.04 * self._lf_noise(N, 30.0)
         noise = self.rng.standard_normal(N)
         # breath noise is louder while the glottis is open
         open_mask = ((phase > _CLOSE_PHASE - 0.6) & (phase < _CLOSE_PHASE)).astype(float) * 0.7 + 0.3
+        del phase
         breath = noise * open_mask * (self.breathiness * (1.4 - 0.8 * q))
+        del open_mask, q
         x = AV_s * (glot * shimmer + breath) + AH_s * noise * 2.0
+        del glot, shimmer, breath, noise
 
         y = self._cascade(x, AV_s, AH_s)
+        del x, AV_s, AH_s
         y = sosfilt(_PRESENCE, y)
         # the voiced sound is louder on higher voices and every part is later
         # matched in loudness, so consonant noise follows the voice's own
@@ -1211,14 +1223,14 @@ class Singer:
         tabs = _glottal_tables()
         N = len(phase)
         out = np.zeros(N, dtype=np.float64)
-        pos = phase * _TABLE_N
-        i0 = pos.astype(np.int64) % _TABLE_N
-        frac = pos - np.floor(pos)
-        i1 = (i0 + 1) % _TABLE_N
-        qpos = np.clip(q, 0.0, 1.0) * (_Q_LEVELS - 1)
         step = 4096
         for s in range(0, N, step):
             e = min(N, s + step)
+            pos = phase[s:e] * _TABLE_N
+            i0 = pos.astype(np.int64) % _TABLE_N
+            frac = pos - np.floor(pos)
+            i1 = (i0 + 1) % _TABLE_N
+            qpos = np.clip(q[s:e], 0.0, 1.0) * (_Q_LEVELS - 1)
             fmax = float(np.max(f0[s:e]))
             hmax = int(0.45 * SR / max(fmax, 30.0))
             h = 1
@@ -1226,17 +1238,17 @@ class Singer:
                 if cand <= hmax:
                     h = cand
                     break
-            qp = qpos[s:e]
+            qp = qpos
             lo_q = int(np.floor(qp.min()))
             hi_q = min(_Q_LEVELS - 1, int(np.ceil(qp.max())))
-            fr = frac[s:e]
+            fr = frac
             acc = np.zeros(e - s)
             for qi in range(lo_q, hi_q + 1):
                 wgt = np.clip(1.0 - np.abs(qp - qi), 0.0, 1.0)     # triangular cross-fade
                 if not wgt.any():
                     continue
                 t = tabs[qi][h]
-                acc += wgt * (t[i0[s:e]] * (1 - fr) + t[i1[s:e]] * fr)
+                acc += wgt * (t[i0] * (1 - fr) + t[i1] * fr)
             out[s:e] = acc
         return out
 
@@ -1306,7 +1318,7 @@ class Singer:
             hi = min(0.45 * SR, fc + bw / 2)
             if hi <= lo * 1.05:
                 continue
-            sos = butter(2, [lo, hi], btype="band", fs=SR, output="sos")
+            sos = _band_sos(lo, hi)
             pad = 256
             nz = self.rng.standard_normal(L + pad)
             nz = sosfilt(sos, nz)[pad:]
@@ -1361,6 +1373,12 @@ def _shelf():
          2 * ((A - 1) - (A + 1) * cw),
          (A + 1) - (A - 1) * cw - 2 * np.sqrt(A) * alpha]
     return tf2sos(b, a)
+
+
+@lru_cache(maxsize=4096)
+def _band_sos(lo: float, hi: float) -> np.ndarray:
+    """Band-pass design for a frication band (the same few are used over and over)."""
+    return butter(2, [lo, hi], btype="band", fs=SR, output="sos")
 
 
 _PRESENCE = _shelf()

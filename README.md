@@ -58,6 +58,9 @@ How human it sounds:
 
 Input: `.mscz` / `.mscx` directly (MuseScore 3 and 4), or MusicXML.
 
+Voices are rendered several at once, as many as fit in memory (`--jobs N`
+sets how many): a 2½-minute song with 9 voices renders in about 9 s.
+
 ## Playing the render inside MuseScore (macOS, MuseScore 4)
 
 A plugin renders the open score with one button, and then MuseScore's own
@@ -219,4 +222,5 @@ playback of the same score)
   them are approximated (못 잊어, 꽃잎 and the common lyric words are
   handled; rarer compounds may be read a little too literally).
 - A full song with two singers per backing part takes about twice as long
-  to render as with `--singers 1`.
+  to render as with `--singers 1`, and a voice needs about 1 GB of memory
+  per 2½ minutes of music while it renders.

@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 import zlib
+from concurrent.futures import ProcessPoolExecutor
 from fractions import Fraction as F
 from pathlib import Path
 
@@ -136,10 +138,43 @@ def _write_audio(path: Path, stereo: np.ndarray, bitrate=192):
                         f"{bitrate}k", str(path)], check=True)
 
 
+def _render_voice(job):
+    """Sing one singer's track (runs in a worker process)."""
+    singer = Singer(job["kind"], job["total"], **job["opts"])
+    singer.sing(job["units"], gain_db=job["gain"])
+    ys = singer.render(job["gain"])[:job["N"]]
+    return ys, [tuple(w) for w in singer.air_warnings]
+
+
+def _render_voices(jobs, workers=None):
+    """Every singer's track, in order, several rendered at once."""
+    out = [None] * len(jobs)
+    todo = list(range(len(jobs)))
+    if not workers:
+        # a voice needs about 130 bytes per sample while it renders: run as
+        # many at once as fit in half the memory
+        try:
+            ram = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+        except (ValueError, OSError, AttributeError):
+            ram = 8 * 1024 ** 3
+        per_voice = 130 * max((j["N"] for j in jobs), default=1)
+        workers = max(1, min(os.cpu_count() or 1, int(0.5 * ram / per_voice)))
+    workers = min(len(todo), workers)
+    if workers > 1:
+        with ProcessPoolExecutor(max_workers=workers) as ex:
+            for i, r in zip(todo, ex.map(_render_voice, [jobs[i] for i in todo])):
+                out[i] = r
+    else:
+        for i in todo:
+            out[i] = _render_voice(jobs[i])
+    return out
+
+
 def render_score(path, out=None, bpm=None, tempo_scale=1.0, lang="auto", voices=None,
                  gains=None, focus=None, only=None, mute=None, stems=False, reverb=0.25,
                  vibrato=1.0, measures=None, report=False, quiet=False, singers=2,
-                 humanize=1.0, breaths=1.0, attack=1.0, neutral=None, solo=None):
+                 humanize=1.0, breaths=1.0, attack=1.0, neutral=None, solo=None,
+                 workers=None):
     t_start = time.time()
     path = Path(path)
     score = load_score(path)
@@ -183,6 +218,7 @@ def render_score(path, out=None, bpm=None, tempo_scale=1.0, lang="auto", voices=
     mix = np.zeros((N, 2))
     stem_sigs = {}
     rendered = []
+    parts = []
     for k, (st, name, units, gain) in enumerate(lines):
         nm = st.name.lower()
         if only and not _match(nm, only):
@@ -215,27 +251,38 @@ def render_score(path, out=None, bpm=None, tempo_scale=1.0, lang="auto", voices=
         # different (timing, tuning, vibrato, vocal tract), which is most of
         # what keeps a held chord from sounding like an organ
         n_sing = (1 if is_solo else max(1, int(singers))) if units else 0
-        voices_out = []
+        jobs = []
         for s in range(n_sing):
             spread = 0.0 if n_sing == 1 else (2.0 * s / (n_sing - 1) - 1.0)    # -1..1
-            singer = Singer(kind, total, seed=seed + 7919 * s,
-                            vibrato_cents=vib * (1.0 + 0.15 * spread),
-                            breathiness=0.08 if is_solo else 0.06,
-                            humanize=humanize,
-                            breaths=breaths * (1.0 if is_solo else 0.6) / np.sqrt(n_sing),
-                            attack=attack, scoop_cents=15.0 if is_solo else 10.0,
-                            formant_shift=1.0 + 0.0125 * spread,
-                            detune_cents=3.0 * spread)
-            singer.sing(units, gain_db=gain)
+            opts = dict(seed=seed + 7919 * s,
+                        vibrato_cents=vib * (1.0 + 0.15 * spread),
+                        breathiness=0.08 if is_solo else 0.06,
+                        humanize=humanize,
+                        breaths=breaths * (1.0 if is_solo else 0.6) / np.sqrt(n_sing),
+                        attack=attack, scoop_cents=15.0 if is_solo else 10.0,
+                        formant_shift=1.0 + 0.0125 * spread,
+                        detune_cents=3.0 * spread)
+            opts = {k2: float(v) if isinstance(v, np.floating) else v for k2, v in opts.items()}
+            jobs.append((spread, dict(kind=kind, total=total, N=N, units=units, gain=gain,
+                                      opts=opts)))
+        parts.append((st, name, kind, is_solo, units, hits, gain, seed, jobs))
+
+    sung = _render_voices([j for p in parts for _s, j in p[-1]], workers)
+    sung = iter(sung)
+    for st, name, kind, is_solo, units, hits, gain, seed, jobs in parts:
+        nm = st.name.lower()
+        voices_out = []
+        for s, (spread, _job) in enumerate(jobs):
+            ys, air = next(sung)
             if s == 0:
-                for w in singer.air_warnings:
+                for w in air:
                     air_warn.append((name, gain) + tuple(w))
-            ys = singer.render(gain)[:N]
             bad = ~np.isfinite(ys)
             if bad.any():           # never let one bad sample ruin the file
                 ys = np.where(bad, 0.0, ys)
                 warnings.append(f"{name}: {int(bad.sum())} invalid samples silenced (please report)")
             voices_out.append((spread, ys))
+        n_sing = len(jobs)
         part_db = gains.get(_match(nm, gains.keys()) or "", 0.0)
         if is_solo:
             part_db += 2.0
@@ -386,12 +433,13 @@ def main(argv=None):
     p.add_argument("--attack", type=float, default=1.0,
                    help="attack softness (0.5 = crisper, 2 = very soft)")
     p.add_argument("--report", action="store_true", help="print the syllables each part sings")
+    p.add_argument("--jobs", type=int, help="voices rendered at once (default: one per CPU core)")
     a = p.parse_args(argv)
     render_score(a.score, out=a.out, bpm=a.bpm, tempo_scale=a.tempo_scale, lang=a.lang,
                  voices=a.voice, gains=a.gain, focus=a.focus, only=a.only, mute=a.mute,
                  stems=a.stems, reverb=a.reverb, vibrato=a.vibrato, measures=a.measures,
                  report=a.report, singers=a.singers, humanize=a.humanize, breaths=a.breaths,
-                 attack=a.attack, neutral=a.neutral, solo=a.solo)
+                 attack=a.attack, neutral=a.neutral, solo=a.solo, workers=a.jobs)
 
 
 if __name__ == "__main__":
