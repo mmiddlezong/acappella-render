@@ -7,6 +7,7 @@ lines up with MuseScore's playback.
 """
 from __future__ import annotations
 
+import bisect
 import re
 import zipfile
 import xml.etree.ElementTree as ET
@@ -23,6 +24,7 @@ DUR = {
 }
 GRACE_TAGS = {"acciaccatura", "appoggiatura", "grace4", "grace8", "grace16", "grace32",
               "grace8after", "grace16after", "grace32after"}
+SWING_UNITS = {"eighth": 240, "16th": 120, "zero": 0}    # MuseScore ticks
 DYNAMIC_LEVELS = ["pppppp", "ppppp", "pppp", "ppp", "pp", "p", "mp", "mf", "f", "ff",
                   "fff", "ffff", "fffff", "ffffff"]
 
@@ -43,6 +45,8 @@ class ChordEvent:
     ghost: bool = False       # x-notehead / muted note: a short percussive hit
     measure: int = 0          # score measure index (for simile lookups)
     mpos: F = F(0)            # position inside the measure
+    swing_on: float = 0.0     # swing delay, as a fraction of the chord's own length
+    swing_gate: float = 1.0   # swung length, as a fraction of the chord's own length
 
 
 @dataclass
@@ -183,6 +187,15 @@ def _layout_breaks(el, section_pause: float):
 
 
 def _style_value(path: Path, sc, name: str, default: float) -> float:
+    """A numeric score style setting."""
+    found = _style_text(path, sc, name)
+    try:
+        return float(found) if found is not None else default
+    except ValueError:
+        return default
+
+
+def _style_text(path: Path, sc, name: str) -> str | None:
     """A score style setting (score_style.mss in a .mscz, or <Style> in the score)."""
     found = None
     st = sc.find("Style")
@@ -196,10 +209,7 @@ def _style_value(path: Path, sc, name: str, default: float) -> float:
                     found = ET.fromstring(z.read(mss[0])).findtext(f"Style/{name}")
         except (zipfile.BadZipFile, ET.ParseError, KeyError):
             pass
-    try:
-        return float(found) if found is not None else default
-    except ValueError:
-        return default
+    return found
 
 
 def _read_mscz(path: Path) -> bytes:
@@ -269,6 +279,7 @@ def load_mscx(path: Path) -> Score:
     # ---- measure grid from the first staff
     timesig = F(1)
     m_len: list[F] = []
+    m_sig: list[F] = []
     m_pickup: list[bool] = []        # MuseScore's Measure::isAnacrusis()
     m_pause_before: list[float] = []  # section-break pause where the measure starts
     start_rep, end_rep, voltas = set(), {}, {}
@@ -302,6 +313,7 @@ def load_mscx(path: Path) -> Score:
             break  # only voice 1 carries these
         ln = m.get("len")
         m_len.append(_frac(ln) if ln else timesig)
+        m_sig.append(timesig)
         irregular = (m.findtext("irregular") or "0").strip() not in ("", "0")
         m_pickup.append((irregular or after_break) and timesig > m_len[-1])
         # MuseScore pauses at the earliest section break ending where this starts
@@ -371,7 +383,10 @@ def load_mscx(path: Path) -> Score:
     tempo_lines: list[tuple] = []     # rit./accel.: (mi, rel, (measures, fraction), factor, easing)
     seg_points: set = set()           # (mi, rel) of notes, rests, breaths, clefs, barlines
     onset_points: set = set()         # (mi, rel) of notes and rests
+    swing_texts: list[tuple] = []     # (staff index, mi, rel, unit ticks, ratio, all staves)
+    tracks: dict[tuple, list] = {}    # (staff, voice) -> chords/rests/grace notes in score order
     staves: list[Staff] = []
+    staff_raw: list[list] = []
 
     for si, st in enumerate(staff_els):
         nm, inst_id, perc = staff_info[si] if si < len(staff_info) else (f"Staff {si + 1}", "", False)
@@ -415,6 +430,12 @@ def load_mscx(path: Path) -> Score:
                                             follow))
                     elif tag in ("Clef", "KeySig", "TimeSig", "BarLine"):
                         seg_points.add((mi, p))
+                    elif tag in ("StaffText", "SystemText") and e.find("swing") is not None:
+                        if _text(e.find("text")):
+                            sw = e.find("swing")
+                            unit = SWING_UNITS.get((sw.get("unit") or "").strip(), 0)
+                            ratio = int(sw.get("ratio") or 60)
+                            swing_texts.append((si, mi, p, unit, ratio, tag == "SystemText"))
                     elif (tag == "Spanner" and e.get("type") == "GradualTempoChange"
                           and e.find("GradualTempoChange") is not None):
                         g = e.find("GradualTempoChange")
@@ -454,12 +475,18 @@ def load_mscx(path: Path) -> Score:
                             e.findtext("subtype") or "fermataAbove")
                         fermata_marks.append((mi, p, fac))
                     elif tag == "Chord" or tag == "Rest":
+                        track = tracks.setdefault((si, vi), [])
                         if tag == "Chord" and any(e.find(g) is not None for g in GRACE_TAGS):
+                            track.append([_duration(e), None, False, mi, p])
                             continue
                         tid = e.findtext("Tuplet")
+                        in_tuplet = bool(tup_stack)
                         if tid is not None and tid.strip() in tup_by_id:
                             scale *= tup_by_id[tid.strip()]
+                            in_tuplet = True
                         d = _duration(e) * scale
+                        entry = [d, None, in_tuplet, mi, p]
+                        track.append(entry)
                         seg_points.add((mi, p))
                         onset_points.add((mi, p))
                         if tag == "Rest":
@@ -468,6 +495,7 @@ def load_mscx(path: Path) -> Score:
                             p += d
                             continue
                         ev = ChordEvent(start=F(0), dur=d, voice=vi, pitches=[], measure=mi, mpos=p)
+                        entry[1] = ev
                         for n in e.findall("Note"):
                             head = (n.findtext("head") or "").lower()
                             if (n.findtext("play") or "1").strip() == "0" or head in (
@@ -522,6 +550,13 @@ def load_mscx(path: Path) -> Score:
             for vi, a, b in slurs:
                 if vi == ev.voice and a <= s_abs and (b is None or s_abs < b):
                     ev.legato = True
+        staff.dynamics.sort()
+        staves.append(staff)
+        staff_raw.append(raw_events)
+
+    _apply_swing(tracks, swing_texts, onset_points, m_len, m_sig, m_pickup, len(staves),
+                 _style_text(path, sc, "swingUnit"), _style_value(path, sc, "swingRatio", 60))
+    for staff, raw_events in zip(staves, staff_raw):
         # unroll
         for mi, p, ev in raw_events:
             for pp in play_positions(mi, p):
@@ -529,8 +564,6 @@ def load_mscx(path: Path) -> Score:
                 e2.start = pp
                 staff.events.append(e2)
         staff.events.sort(key=lambda e: (e.start, e.voice))
-        staff.dynamics.sort()
-        staves.append(staff)
 
     # tempos / fermatas -> playback space
     tempo_pts: list[tuple] = []
@@ -562,6 +595,67 @@ def load_mscx(path: Path) -> Score:
                        fermata_marks, breath_pauses, tempo_lines, seg_points, onset_points)
     return Score(title=title, staves=staves, tempos=tempo_pts, fermatas=ferm, end=total,
                  warnings=warnings, measures=mlist, muse_tempo=muse)
+
+
+def _apply_swing(tracks, swing_texts, onset_points, m_len, m_sig, m_pickup, n_staves,
+                 style_unit, style_ratio):
+    """Swing the way MuseScore 4 plays it (Swing::applySwing): a chord on the
+    off-beat of the swing unit starts later by (ratio - 50)% of a beat and is
+    shortened to end where it did; a chord ending on that off-beat is
+    lengthened to meet it.  Nothing changes where the beat is subdivided (this
+    chord, or the one before it, shorter than the unit), in tuplets, or for
+    rests.  Each staff swings by the score style until a "Swing"/"Straight"
+    text: a system text changes every staff, a staff text its own.  Sets
+    swing_on / swing_gate on the chords."""
+    tk = musetempo.ticks
+    m_start = [F(0)]
+    for ln in m_len:
+        m_start.append(m_start[-1] + ln)
+
+    def tick(mi, rel):
+        return tk(m_start[mi] + rel)
+
+    default = (SWING_UNITS.get((style_unit or "").strip(), 0), int(style_ratio))
+    maps: list[dict] = [{} for _ in range(n_staves)]
+    for si, mi, p, unit, ratio, system in swing_texts:
+        if (mi, p) not in onset_points:     # MuseScore only reads them on notes/rests
+            continue
+        for k in (range(n_staves) if system else [si]):
+            maps[k][tick(mi, p)] = (unit, ratio)
+    if not default[0] and not any(maps):
+        return
+    keys = [sorted(m) for m in maps]
+
+    def swing_at(si, t):
+        i = bisect.bisect_right(keys[si], t) - 1
+        return maps[si][keys[si][i]] if i >= 0 else default
+
+    for (si, _vi), seq in tracks.items():
+        dur = [tk(entry[0]) for entry in seq]
+        for i, (_d, ev, in_tuplet, mi, p) in enumerate(seq):
+            if ev is None or in_tuplet or not ev.pitches:
+                continue
+            unit, ratio = swing_at(si, tick(mi, p))
+            if not unit:
+                continue
+
+            def subdivided(j):
+                if j >= len(seq):
+                    return False
+                return dur[j] < unit or (j > 0 and dur[j - 1] < unit)
+
+            beat = unit * 2
+            adjust = beat * ((ratio - 50) / 100.0) / float(dur[i]) * 1000.0
+            start = tk(p) + (tk(m_sig[mi] - m_len[mi]) if m_pickup[mi] else 0)
+            on, gate = 0, 100
+            if start % beat == unit and not subdivided(i):
+                on = int(on + adjust)
+                gate = int(200 - (gate + adjust / 10))
+            if int(start + float(dur[i])) % beat == unit and not subdivided(i + 1):
+                gate = int(gate + adjust / 10)
+            if gate <= 0:
+                gate = 100
+            ev.swing_on, ev.swing_gate = on / 1000.0, gate / 100.0
 
 
 def _muse_tempo(m_start, m_len, m_pickup, m_pause_before, order, tempo_marks, fermata_marks,

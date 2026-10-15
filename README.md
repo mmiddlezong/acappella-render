@@ -127,6 +127,11 @@ playback of the same score)
 - A breath mark or caesura with a pause (Properties > Pause) adds that
   much silence; the note before it stops at the mark. Section breaks pause
   3 s (or what they're set to) before the next bar.
+- Swing, from the score's swing setting or a "Swing"/"Straight" text (a
+  system text sets every part, a staff text just its own): a note on the
+  off-beat of the swing unit comes in later by the swing ratio and still
+  ends on time, the note before it is held to meet it, and nothing swings
+  where the beat is subdivided or in tuplets.
 
 **Dynamics**
 - ppp to fff are about 5–6 dB apart, and voice quality follows: soft is
@@ -172,8 +177,6 @@ playback of the same score)
 ## Limits
 - It sounds synthetic. Judge syllables, rhythm, dynamics and balance, not
   tone.
-- Swing (a "Swing" staff text or the score's swing setting) isn't played:
-  MuseScore delays the off-beat eighths, the render keeps them straight.
 - Percussion (drum) staves are skipped; write vocal percussion with
   x-noteheads on the singer's own staff. Repeats and voltas are followed, but
   D.S./D.C./Coda jumps aren't. Only verse 1 lyrics are used.

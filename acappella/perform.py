@@ -41,6 +41,9 @@ class Item:
     sim: bool = False
     korean: bool = False
     word: bool = False
+    own: F = F(0)            # the first chord's own length (before ties)
+    swing_on: float = 0.0    # MuseScore swing, as fractions of that length
+    swing_gate: float = 1.0
 
     @property
     def end(self):
@@ -81,7 +84,8 @@ def _lines_for_staff(staff: Staff):
                 items.append(Item(start=e.start, dur=e.dur, pitch=p, lyric=lyric or None,
                                   syllabic=syllabic, tie=p in e.tie_next, gliss=p in e.gliss,
                                   legato=e.legato, staccato=e.staccato, accent=e.accent,
-                                  ghost=e.ghost, measure=e.measure, mpos=e.mpos))
+                                  ghost=e.ghost, measure=e.measure, mpos=e.mpos, own=e.dur,
+                                  swing_on=e.swing_on, swing_gate=e.swing_gate))
             label = staff.name
             if len(by_voice) > 1:
                 label += f" v{v + 1}"
@@ -228,6 +232,13 @@ def _units_for_line(items: list[Item], tm: TimeMap, breaths: list, offset: float
     for k, it in enumerate(items):
         t0 = tm.sec(it.start) + offset
         t_end = tm.sec(it.end, before_pause=True) + offset    # silent through a caesura
+        if it.swing_on or it.swing_gate != 1.0:
+            # as MuseScore swings: the chord's own length moves and stretches,
+            # what a tie adds to it stays
+            own_end = tm.sec(it.start + it.own) + offset
+            nominal = own_end - t0
+            t0 += nominal * it.swing_on
+            t_end = t0 + nominal * it.swing_gate + (t_end - own_end)
         t1 = t0 + (t_end - t0) * it.staccato
         marked = any(abs(it.end - b) <= F(1, 32) for b in breath_set)
         if marked:
