@@ -81,17 +81,21 @@ musescore/install.sh
 
 This builds and installs the "Acappella Render" VST3 effect (it fetches the
 MIT-licensed VST 3 SDK into `musescore/build/` the first time; needs CMake
-and the Xcode command line tools) and the "Acappella Render" MuseScore
-plugin. Then:
+and the Xcode command line tools), the "Acappella Render" MuseScore
+extension (already enabled) and a small background helper app. Then:
 
 1. Quit and reopen MuseScore.
-2. Home > Plugins: enable Acappella Render.
-3. Plugins > Acappella Render > Render. It saves the score, renders it
-   (about 20 s for a 3-minute song) and shows the renderer's notes.
-4. Once per score: in the Mixer, add Acappella Render to the Master
+2. On the Score page, the Extensions toolbar (top right) has two buttons.
+   The microphone is **Render**: one click saves the score and renders it
+   in the background with the last settings; a notification says when it's
+   ready. The cog opens **Settings and status** (singers per part, lyrics on
+   "ah", MuseScore's sound underneath), with its own Render button and the
+   renderer's notes.
+3. Once per score: in the Mixer, add Acappella Render to the Master
    channel's Audio FX. Press Play.
 
-Render again after editing; the new render takes over even mid-playback.
+Render again after editing: only the parts you changed are sung again, and
+the new render takes over even mid-playback.
 Switch the effect off in the Mixer to hear MuseScore's sounds again. While
 playback is stopped MuseScore's sound passes through, so clicking notes
 still sounds. "Keep MuseScore's own sound underneath" in the dialog mixes it
@@ -101,8 +105,14 @@ The render is timed exactly the way MuseScore times playback (see Tempo
 below), so it stays with the cursor. Keep the playback speed at 100% and repeats on:
 the render doesn't follow MuseScore's speed slider, and D.S./D.C./Coda jumps
 aren't rendered, so playback drifts after the first jump.
-`musescore/install.sh --uninstall` removes the effect and the plugin. Renders
-are kept in `~/Library/Application Support/AcappellaRender/` (the last 3).
+`musescore/install.sh --uninstall` removes the effect, the extension and the
+helper. Renders are kept in `~/Library/Application Support/AcappellaRender/`
+(the last 3).
+
+Extension scripts can't start programs, so the Render button opens an
+`acappella-render://render?score=NAME` link, which the helper app passes to
+the renderer. It only renders a score MuseScore has open (one in its recent
+files) and nothing else.
 
 ## How it reads your score
 

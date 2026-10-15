@@ -1,8 +1,9 @@
-// Acappella Render for MuseScore 4: renders the open score with the
-// a cappella renderer, then MuseScore's own playback (play button, cursor,
-// loops, starting from a selected note) plays the render instead of
-// MuseScore's sounds, through the "Acappella Render" effect on the Master
-// channel.  install.sh fills in the @...@ paths.
+// Acappella Render for MuseScore 4, "Settings and status": renders the open
+// score with the a cappella renderer, then MuseScore's own playback (play
+// button, cursor, loops, starting from a selected note) plays the render
+// instead of MuseScore's sounds, through the "Acappella Render" effect on
+// the Master channel.  The settings here are the ones the one-click Render
+// button (render.js) uses too.  install.sh fills in the @...@ paths.
 
 import QtQuick
 import QtQuick.Controls
@@ -35,15 +36,9 @@ MuseScore {
     property real startedAt: 0
     property int elapsed: 0
 
-    Settings {
-        category: "AcappellaRender"
-        property alias singers: singersCtl.currentValue
-        property alias neutral: neutralBox.checked
-        property alias underneath: underneathBox.checked
-    }
-
     QProcess { id: proc }
     FileIO { id: statusFile; source: plugin.dataDir + "/status.json" }
+    FileIO { id: settingsFile; source: plugin.dataDir + "/settings.json" }
 
     Timer {
         interval: 400
@@ -52,7 +47,24 @@ MuseScore {
         onTriggered: plugin.poll()
     }
 
-    onRun: poll()
+    onRun: {
+        loadSettings()
+        poll()
+    }
+
+    // the settings of the last render, shared with the Render button
+    function loadSettings() {
+        if (!settingsFile.exists()) {
+            return
+        }
+        try {
+            var st = JSON.parse(settingsFile.read())
+            singersCtl.currentValue = st.singers
+            neutralBox.checked = st.neutral !== ""
+            underneathBox.checked = st.musescore_gain > 0
+        } catch (e) {
+        }
+    }
 
     function poll() {
         if (phase === "rendering") {
@@ -69,6 +81,10 @@ MuseScore {
         }
         // a render this dialog started, or (when just opened) the last one
         if (request !== "" && s.request !== request) {
+            if (phase === "rendering" && Date.now() - startedAt > 20000) {
+                phase = "error"
+                message = "The renderer didn't start (see " + dataDir + "/bridge.log)."
+            }
             return
         }
         if (s.state === "rendering" && Date.now() - s.started * 1000 > 15 * 60 * 1000) {
@@ -223,8 +239,10 @@ MuseScore {
             horizontalAlignment: Text.AlignLeft
             wrapMode: Text.WordWrap
             opacity: 0.75
-            text: "Once per score: open the Mixer and add \"Acappella Render\" to the Master "
-                  + "channel's Audio FX. Switch the effect off to hear MuseScore's sounds again."
+            text: "The microphone button on the Extensions toolbar renders again with these "
+                  + "settings in one click, reusing every part that didn't change. Once per score: "
+                  + "open the Mixer and add \"Acappella Render\" to the Master channel's Audio FX. "
+                  + "Switch the effect off to hear MuseScore's sounds again."
         }
     }
 }

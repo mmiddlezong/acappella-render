@@ -1,0 +1,27 @@
+{
+    "uri": "musescore://extensions/acappella_render",
+    "type": "composite",
+    "title": "Acappella Render",
+    "description": "Render the score with acappella-render and hear it through MuseScore's playback",
+    "category": "playback",
+    "version": "1.1",
+    "apiversion": 1,
+    "actions": [
+        {
+            "code": "render",
+            "type": "macros",
+            "title": "Render",
+            "path": "render.js",
+            "icon": "MICROPHONE",
+            "show_on_toolbar": true
+        },
+        {
+            "code": "settings",
+            "type": "form",
+            "title": "Settings and status",
+            "path": "AcappellaRender.qml",
+            "icon": "SETTINGS_COG",
+            "show_on_toolbar": true
+        }
+    ]
+}
