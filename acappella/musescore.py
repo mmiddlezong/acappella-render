@@ -122,16 +122,18 @@ def render_for_musescore(name: str, request: str, singers=2, neutral=None, muses
     from .render import PREROLL, render_score
 
     started = time.time()
-    _status(state="rendering", request=request, score=name, started=started,
-            message=f"Rendering {name}...")
+    _status(state="rendering", request=request, score=name, started=started, message="Starting")
     path = find_score(name)
     out_dir = DATA / "renders"
     out_dir.mkdir(parents=True, exist_ok=True)
     safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in path.stem)[:60]
     out = out_dir / f"{safe}-{int(started)}.wav"
+    def progress(text):
+        _status(state="rendering", request=request, score=name, started=started, message=text)
+
     log = io.StringIO()
     with contextlib.redirect_stdout(log):
-        render_score(path, out=out, singers=singers, neutral=neutral or None)
+        render_score(path, out=out, singers=singers, neutral=neutral or None, progress=progress)
     _write_manifest({"audio": str(out), "offset": f"{PREROLL:g}", "render_gain": "1",
                      "musescore_gain": f"{musescore_gain:g}", "title": name, "score": str(path)})
     for old in sorted(out_dir.glob("*.wav"), key=lambda p: p.stat().st_mtime)[:-KEEP_RENDERS]:

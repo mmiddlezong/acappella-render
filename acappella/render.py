@@ -6,7 +6,7 @@ import os
 import sys
 import time
 import zlib
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from fractions import Fraction as F
 from pathlib import Path
 
@@ -147,9 +147,10 @@ def _render_voice(job):
     return ys, [tuple(w) for w in singer.air_warnings]
 
 
-def _render_voices(jobs, use_cache=True, workers=None):
+def _render_voices(jobs, use_cache=True, workers=None, progress=None):
     """Every singer's track, in order: from the cache when nothing that goes
-    into it changed, otherwise rendered, several at once."""
+    into it changed, otherwise rendered, several at once.  progress(done,
+    to_sing, unchanged) is called as voices finish."""
     keys = [cache.voice_key(j) for j in jobs] if use_cache else [None] * len(jobs)
     out = [cache.load(k) if k else None for k in keys]
     todo = [i for i, r in enumerate(out) if r is None]
@@ -163,13 +164,21 @@ def _render_voices(jobs, use_cache=True, workers=None):
         per_voice = 130 * max((j["N"] for j in jobs), default=1)
         workers = max(1, min(os.cpu_count() or 1, int(0.5 * ram / per_voice)))
     workers = min(len(todo), workers)
+    unchanged = len(jobs) - len(todo)
+    if progress:
+        progress(0, len(todo), unchanged)
     if workers > 1:
         with ProcessPoolExecutor(max_workers=workers) as ex:
-            for i, r in zip(todo, ex.map(_render_voice, [jobs[i] for i in todo])):
-                out[i] = r
+            running = {ex.submit(_render_voice, jobs[i]): i for i in todo}
+            for k, f in enumerate(as_completed(running), 1):
+                out[running[f]] = f.result()
+                if progress:
+                    progress(k, len(todo), unchanged)
     else:
-        for i in todo:
+        for k, i in enumerate(todo, 1):
             out[i] = _render_voice(jobs[i])
+            if progress:
+                progress(k, len(todo), unchanged)
     if use_cache:
         for i in todo:
             cache.store(keys[i], *out[i])
@@ -181,9 +190,15 @@ def render_score(path, out=None, bpm=None, tempo_scale=1.0, lang="auto", voices=
                  gains=None, focus=None, only=None, mute=None, stems=False, reverb=0.25,
                  vibrato=1.0, measures=None, report=False, quiet=False, singers=2,
                  humanize=1.0, breaths=1.0, attack=1.0, neutral=None, solo=None,
-                 use_cache=True, workers=None):
+                 use_cache=True, workers=None, progress=None):
+    """progress(text), if given, hears what the render is doing."""
+    def say(text):
+        if progress:
+            progress(text)
+
     t_start = time.time()
     path = Path(path)
+    say("Reading the score")
     score = load_score(path)
     tm = score.time_map(bpm_override=bpm, tempo_scale=tempo_scale)
 
@@ -274,7 +289,18 @@ def render_score(path, out=None, bpm=None, tempo_scale=1.0, lang="auto", voices=
                                       opts=opts)))
         parts.append((st, name, kind, is_solo, units, hits, gain, seed, jobs))
 
-    sung, reused = _render_voices([j for p in parts for _s, j in p[-1]], use_cache, workers)
+    def sung_so_far(done, to_sing, unchanged):
+        if not to_sing:
+            left = "nothing to sing"
+        elif done:
+            left = f"{done} of {to_sing} voices sung"
+        else:
+            left = f"Singing {to_sing} voice" + ("s" if to_sing > 1 else "")
+        say(left + (f", {unchanged} unchanged" if unchanged else ""))
+
+    sung, reused = _render_voices([j for p in parts for _s, j in p[-1]], use_cache, workers,
+                                  sung_so_far)
+    say("Mixing")
     sung = iter(sung)
     for st, name, kind, is_solo, units, hits, gain, seed, jobs in parts:
         nm = st.name.lower()

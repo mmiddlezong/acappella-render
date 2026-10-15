@@ -87,8 +87,10 @@ extension (already enabled) and a small background helper app. Then:
 1. Quit and reopen MuseScore.
 2. On the Score page, the Extensions toolbar (top right) has two buttons.
    The microphone is **Render**: one click saves the score and renders it
-   in the background with the last settings; a notification says when it's
-   ready. The cog opens **Settings and status** (singers per part, lyrics on
+   in the background with the last settings. A small panel at the top right
+   shows it working ("Rendering tiao-lou-ji · 6 s, 4 of 9 voices sung"),
+   then "Ready. Press Play." for a few seconds, or what went wrong (click
+   to close it). It never takes the keyboard from MuseScore. The cog opens **Settings and status** (singers per part, lyrics on
    "ah", MuseScore's sound underneath), with its own Render button and the
    renderer's notes.
 3. Once per score: in the Mixer, add Acappella Render to the Master
@@ -111,7 +113,7 @@ helper. Renders are kept in `~/Library/Application Support/AcappellaRender/`
 
 Extension scripts can't start programs, so the Render button opens an
 `acappella-render://render?score=NAME` link, which the helper app passes to
-the renderer. It only renders a score MuseScore has open (one in its recent
+the renderer while it shows the progress panel. It only renders a score MuseScore has open (one in its recent
 files) and nothing else.
 
 ## How it reads your score

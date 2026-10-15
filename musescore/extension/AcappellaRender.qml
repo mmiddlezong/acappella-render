@@ -95,6 +95,7 @@ MuseScore {
             if (phase !== "rendering") {
                 startedAt = s.started * 1000
             }
+            message = "Rendering " + s.score + ": " + s.message   // what it's doing now
         } else if (s.state === "done") {
             var when = new Date(s.finished * 1000)
             message = s.message + "\nReady " + when.toLocaleTimeString(Qt.locale(), "HH:mm") + ". Press Play in MuseScore."

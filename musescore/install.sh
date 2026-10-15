@@ -5,7 +5,8 @@
 #   - the "Acappella Render" MuseScore extension: a one-click Render button and
 #     a Settings and status window on the Extensions toolbar of the Score page
 #   - a small background helper app that the Render button's
-#     acappella-render:// links start renders through
+#     acappella-render:// links start renders through; it shows their
+#     progress in a floating panel
 #
 #   musescore/install.sh               build and install
 #   musescore/install.sh --uninstall   remove both again
@@ -81,28 +82,44 @@ entries.append({"uri": uri, "actions": [{"code": "render", "exec_point": "manual
 Path(config).write_text(json.dumps(entries, indent=2), encoding="utf-8")
 EOF
 
-# the helper app: opens acappella-render://render?score=NAME and starts the render
-"$PY" - "$HERE/helper.applescript" "$BUILD/helper.applescript" "$PY" "$HERE/bridge.py" "$DATA/bridge.log" <<'EOF'
+# the helper app: opens acappella-render://render?score=NAME links, starts the
+# render and shows its progress in a small floating panel
+"$PY" - "$HERE/helper.swift" "$BUILD/helper.swift" "$PY" "$HERE/bridge.py" "$DATA" <<'EOF'
 import sys
-src, dst, py, bridge, log = sys.argv[1:]
+src, dst, py, bridge, data = sys.argv[1:]
 text = open(src, encoding="utf-8").read()
-for key, val in (("PYTHON", py), ("BRIDGE", bridge), ("LOG", log)):
+for key, val in (("PYTHON", py), ("BRIDGE", bridge), ("DATA", data)):
     text = text.replace(f'"@{key}@"', '"' + val.replace("\\", "\\\\").replace('"', '\\"') + '"')
 open(dst, "w", encoding="utf-8").write(text)
 EOF
 [ -d "$HELPER" ] && "$LSREGISTER" -u "$HELPER" 2>/dev/null || true
 rm -rf "$HELPER"
-osacompile -o "$HELPER" "$BUILD/helper.applescript"
-PLIST="$HELPER/Contents/Info.plist"
-PB=/usr/libexec/PlistBuddy
-$PB -c "Delete :CFBundleIdentifier" "$PLIST" 2>/dev/null || true
-$PB -c "Add :CFBundleIdentifier string com.github.acappella-render.helper" \
-    -c "Add :LSUIElement bool true" \
-    -c "Add :CFBundleURLTypes array" \
-    -c "Add :CFBundleURLTypes:0 dict" \
-    -c "Add :CFBundleURLTypes:0:CFBundleURLName string AcappellaRender" \
-    -c "Add :CFBundleURLTypes:0:CFBundleURLSchemes array" \
-    -c "Add :CFBundleURLTypes:0:CFBundleURLSchemes:0 string acappella-render" "$PLIST"
+mkdir -p "$HELPER/Contents/MacOS"
+swiftc -O -swift-version 5 "$BUILD/helper.swift" -o "$HELPER/Contents/MacOS/AcappellaRenderHelper"
+cat > "$HELPER/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key><string>AcappellaRenderHelper</string>
+    <key>CFBundleIdentifier</key><string>com.github.acappella-render.helper</string>
+    <key>CFBundleName</key><string>Acappella Render Helper</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>1.2</string>
+    <key>CFBundleVersion</key><string>3</string>
+    <key>LSMinimumSystemVersion</key><string>11.0</string>
+    <key>LSUIElement</key><true/>
+    <key>NSPrincipalClass</key><string>NSApplication</string>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key><string>AcappellaRender</string>
+            <key>CFBundleURLSchemes</key><array><string>acappella-render</string></array>
+        </dict>
+    </array>
+</dict>
+</plist>
+PLIST
 codesign --force --deep --sign - "$HELPER" >/dev/null 2>&1 || true
 "$LSREGISTER" -f "$HELPER"
 
@@ -116,8 +133,9 @@ Installed:
 Next, in MuseScore 4:
   1. Quit and reopen MuseScore.
   2. On the Score page, the Extensions toolbar (top right) has a microphone
-     button: Render, in one click, with the last settings. The cog next to it
-     opens Settings and status. A notification says when a render is ready.
+     button: Render, in one click, with the last settings; a small panel at
+     the top right shows its progress. The cog next to it opens Settings and
+     status.
   3. Once per score: open the Mixer and add "Acappella Render" to the Master
      channel's Audio FX. Press Play: you hear the render, following the cursor.
      Switch the effect off to hear MuseScore's own sounds again.
