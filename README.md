@@ -58,8 +58,16 @@ How human it sounds:
 
 Input: `.mscz` / `.mscx` directly (MuseScore 3 and 4), or MusicXML.
 
-Voices are rendered several at once, as many as fit in memory (`--jobs N`
-sets how many): a 2½-minute song with 9 voices renders in about 9 s.
+**Re-rendering is quick.** Every singer's track is kept (in
+`~/Library/Caches/acappella-render/`, up to 3 GB) under a fingerprint of
+everything that goes into it, so rendering again after an edit only sings
+the parts that changed, and changing only the mix (`--gain`, `--focus`,
+`--reverb`) sings nothing again. The result is the same, sample for sample,
+as a fresh render. The voices that are sung are rendered several at once
+(as many as fit in memory). A 2½-minute song with 9 voices renders in about
+9 s, about 5 s after changing one part, and 2 s with nothing changed.
+`--no-cache` sings everything again; `--jobs N` sets how many voices render at
+once.
 
 ## Playing the render inside MuseScore (macOS, MuseScore 4)
 

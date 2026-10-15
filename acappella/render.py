@@ -13,6 +13,7 @@ from pathlib import Path
 import numpy as np
 from scipy.signal import butter, oaconvolve, sosfilt
 
+from . import cache
 from .perc import REF as PART_REF
 from .perc import render_hits
 from .perform import plan, voice_kind
@@ -146,10 +147,12 @@ def _render_voice(job):
     return ys, [tuple(w) for w in singer.air_warnings]
 
 
-def _render_voices(jobs, workers=None):
-    """Every singer's track, in order, several rendered at once."""
-    out = [None] * len(jobs)
-    todo = list(range(len(jobs)))
+def _render_voices(jobs, use_cache=True, workers=None):
+    """Every singer's track, in order: from the cache when nothing that goes
+    into it changed, otherwise rendered, several at once."""
+    keys = [cache.voice_key(j) for j in jobs] if use_cache else [None] * len(jobs)
+    out = [cache.load(k) if k else None for k in keys]
+    todo = [i for i, r in enumerate(out) if r is None]
     if not workers:
         # a voice needs about 130 bytes per sample while it renders: run as
         # many at once as fit in half the memory
@@ -167,14 +170,18 @@ def _render_voices(jobs, workers=None):
     else:
         for i in todo:
             out[i] = _render_voice(jobs[i])
-    return out
+    if use_cache:
+        for i in todo:
+            cache.store(keys[i], *out[i])
+        cache.prune()
+    return out, len(jobs) - len(todo)
 
 
 def render_score(path, out=None, bpm=None, tempo_scale=1.0, lang="auto", voices=None,
                  gains=None, focus=None, only=None, mute=None, stems=False, reverb=0.25,
                  vibrato=1.0, measures=None, report=False, quiet=False, singers=2,
                  humanize=1.0, breaths=1.0, attack=1.0, neutral=None, solo=None,
-                 workers=None):
+                 use_cache=True, workers=None):
     t_start = time.time()
     path = Path(path)
     score = load_score(path)
@@ -267,7 +274,7 @@ def render_score(path, out=None, bpm=None, tempo_scale=1.0, lang="auto", voices=
                                       opts=opts)))
         parts.append((st, name, kind, is_solo, units, hits, gain, seed, jobs))
 
-    sung = _render_voices([j for p in parts for _s, j in p[-1]], workers)
+    sung, reused = _render_voices([j for p in parts for _s, j in p[-1]], use_cache, workers)
     sung = iter(sung)
     for st, name, kind, is_solo, units, hits, gain, seed, jobs in parts:
         nm = st.name.lower()
@@ -339,8 +346,10 @@ def render_score(path, out=None, bpm=None, tempo_scale=1.0, lang="auto", voices=
             _write_audio(st_out, np.stack([sig, sig], axis=1) * gain_norm)
 
     if not quiet:
+        n_voices = sum(len(p[-1]) for p in parts)
+        again = f", {reused} of {n_voices} voices unchanged" if reused else ""
         print(f"{score.title}: {total - PREROLL - TAIL:.1f}s of music, "
-              f"rendered in {time.time() - t_start:.1f}s -> {out}")
+              f"rendered in {time.time() - t_start:.1f}s{again} -> {out}")
         saved = time.strftime("%Y-%m-%d %H:%M", time.localtime(path.stat().st_mtime))
         print(f"  score file: {path.resolve()} (last saved {saved})")
         print(f"  lyrics read as: {LANG_NAMES.get(lang_used, lang_used)}")
@@ -433,13 +442,16 @@ def main(argv=None):
     p.add_argument("--attack", type=float, default=1.0,
                    help="attack softness (0.5 = crisper, 2 = very soft)")
     p.add_argument("--report", action="store_true", help="print the syllables each part sings")
+    p.add_argument("--no-cache", action="store_true",
+                   help="sing every voice again instead of reusing the ones that didn't change")
     p.add_argument("--jobs", type=int, help="voices rendered at once (default: one per CPU core)")
     a = p.parse_args(argv)
     render_score(a.score, out=a.out, bpm=a.bpm, tempo_scale=a.tempo_scale, lang=a.lang,
                  voices=a.voice, gains=a.gain, focus=a.focus, only=a.only, mute=a.mute,
                  stems=a.stems, reverb=a.reverb, vibrato=a.vibrato, measures=a.measures,
                  report=a.report, singers=a.singers, humanize=a.humanize, breaths=a.breaths,
-                 attack=a.attack, neutral=a.neutral, solo=a.solo, workers=a.jobs)
+                 attack=a.attack, neutral=a.neutral, solo=a.solo, use_cache=not a.no_cache,
+                 workers=a.jobs)
 
 
 if __name__ == "__main__":
