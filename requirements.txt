@@ -2,6 +2,7 @@ numpy
 scipy
 cmudict
 lameenc
+numba        # optional, but renders several times faster
 # optional
 pypinyin
 music21

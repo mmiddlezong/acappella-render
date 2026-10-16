@@ -14,6 +14,7 @@ Python 3.9 or newer.
 
 ```
 pip install numpy scipy cmudict lameenc
+pip install numba         # optional, but renders several times faster
 pip install pypinyin      # optional: Chinese-character lyrics
 pip install music21       # optional: MusicXML input
 ```
@@ -58,14 +59,18 @@ How human it sounds:
 
 Input: `.mscz` / `.mscx` directly (MuseScore 3 and 4), or MusicXML.
 
-**Re-rendering is quick.** Every singer's track is kept (in
+**Rendering is quick.** With numba installed the synthesizer is compiled
+(the first render compiles it, once) and each voice is spread over all the
+cores, several voices at once. Every singer's track is also kept (in
 `~/Library/Caches/acappella-render/`, up to 3 GB) under a fingerprint of
 everything that goes into it, so rendering again after an edit only sings
 the parts that changed, and changing only the mix (`--gain`, `--focus`,
-`--reverb`) sings nothing again. The result is the same, sample for sample,
-as a fresh render. The voices that are sung are rendered several at once
-(as many as fit in memory). A 2½-minute song with 9 voices renders in about
-9 s, about 5 s after changing one part, and 2 s with nothing changed.
+`--reverb`) sings nothing again. A reused voice is the same, sample for
+sample, as a fresh render. A 2½-minute song with 9 voices renders in about
+2½ s, 1 s after changing one part, and ½ s with nothing changed (plus about
+a second for Python to start).
+Without numba it takes several times longer and sounds the same (the files
+differ by at most the last bit of a sample, here and there).
 `--no-cache` sings everything again; `--jobs N` sets how many voices render at
 once.
 

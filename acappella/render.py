@@ -6,12 +6,14 @@ import os
 import sys
 import time
 import zlib
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from fractions import Fraction as F
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
-from scipy.signal import butter, oaconvolve, sosfilt
+from scipy.fft import irfft, next_fast_len, rfft
+from scipy.signal import butter, sosfilt
 
 from . import cache
 from .perc import REF as PART_REF
@@ -71,6 +73,7 @@ def _neutralize(units, syl):
     return out
 
 
+@lru_cache(maxsize=4)
 def _reverb_ir(rt60=1.3, length=2.2, seed=7):
     rng = np.random.default_rng(seed)
     L = int(length * SR)
@@ -92,6 +95,13 @@ def _reverb_ir(rt60=1.3, length=2.2, seed=7):
     return ir
 
 
+@lru_cache(maxsize=4)
+def _reverb_spectrum(L, dtype=np.float64):
+    """The room's two channels, transformed for a convolution of length L."""
+    ir = _reverb_ir().astype(dtype)
+    return [rfft(ir[:, c], L, workers=-1) for c in range(2)]
+
+
 def _pan(i, n, name, kind):
     nm = name.lower()
     if "voice" in nm or "solo" in nm or "lead" in nm or kind == "bass" or "bass" in nm:
@@ -101,22 +111,40 @@ def _pan(i, n, name, kind):
     return -0.6 + 1.2 * i / (n - 1)
 
 
+_HIGHPASS = butter(2, 180, btype="high", fs=SR, output="sos")
+REVERB_BLOCK = 2 ** 18      # samples of the mix per block of the reverb
+
+
 def _loudness(y):
     """Rough loudness: RMS after a high-pass (low notes count for less)."""
-    hp = sosfilt(butter(2, 180, btype="high", fs=SR, output="sos"), y)
+    hp = sosfilt(_HIGHPASS, y)
     voiced = np.abs(hp) > 1e-4
     if not voiced.any():
         return 1e-9
     return float(np.sqrt(np.mean(hp[voiced] ** 2)))
 
 
-def _write_audio(path: Path, stereo: np.ndarray, bitrate=192):
-    stereo = np.nan_to_num(stereo, nan=0.0, posinf=0.0, neginf=0.0)
+def _write_audio(path: Path, stereo: np.ndarray, bitrate=192, finite=False, scratch=False):
+    """Write -1..1 stereo as 16-bit audio.  finite: no NaN/inf to clean up;
+    scratch: stereo may be used up (converted in place)."""
+    if not finite:
+        stereo = np.nan_to_num(stereo, nan=0.0, posinf=0.0, neginf=0.0)
+    elif not scratch:
+        stereo = stereo.copy()
+    np.clip(stereo, -1, 1, out=stereo)
+    stereo *= 32767
+    _write_pcm(path, stereo.astype(np.int16), bitrate)
+
+
+def _write_pcm(path: Path, pcm: np.ndarray, bitrate=192):
     if path.suffix.lower() == ".wav":
-        from scipy.io import wavfile
-        wavfile.write(str(path), SR, (np.clip(stereo, -1, 1) * 32767).astype(np.int16))
+        import wave
+        with wave.open(str(path), "wb") as w:
+            w.setnchannels(2)
+            w.setsampwidth(2)
+            w.setframerate(SR)
+            w.writeframes(pcm.tobytes())
         return
-    pcm = (np.clip(stereo, -1, 1) * 32767).astype(np.int16)
     try:
         import lameenc  # type: ignore
         enc = lameenc.Encoder()
@@ -139,21 +167,166 @@ def _write_audio(path: Path, stereo: np.ndarray, bitrate=192):
                         f"{bitrate}k", str(path)], check=True)
 
 
-def _render_voice(job):
-    """Sing one singer's track (runs in a worker process)."""
-    singer = Singer(job["kind"], job["total"], **job["opts"])
-    singer.sing(job["units"], gain_db=job["gain"])
-    ys = singer.render(job["gain"])[:job["N"]]
+def _render_voice(job, key=None, part_gain=None):
+    """Sing one singer's track, or a part's percussion track (job["hits"]);
+    runs in a worker process.  Returns (track, air warnings, loudness):
+    with a cache key, the track goes into the cache and comes back as None
+    (so it doesn't have to be copied back to the caller); with the part's
+    dynamics curve (a part of just this voice), loudness is the part's
+    calibration level, else None."""
+    ys, air = _render_track(job)
+    ref = None
+    if part_gain is not None and _finite(ys):
+        ref = _part_loudness([ys], part_gain)
+    if key and cache.store(key, ys, air):
+        return None, air, ref
+    return ys, air, ref
+
+
+def _finite(ys):
+    from . import synth
+    if synth._fast is not None:
+        return synth._fast.parallel(synth._fast.finite, ys)
+    return bool(np.isfinite(ys.sum(dtype=np.float64)))
+
+
+def _part_loudness(voices, gain):
+    """A part's loudness with the dynamics curve divided back out (render
+    _score calibrates every part to the same level at 'f')."""
+    from . import synth
+    fast = synth._fast
+    if fast is not None:
+        return float(fast.parallel(fast.part_loudness, np.stack(voices),
+                                   np.ascontiguousarray(gain, dtype=np.float64),
+                                   float(SR), CR, _HIGHPASS[0]))
+    y = np.sum(voices, axis=0)
+    g = np.interp(np.arange(len(y)) / SR * CR, np.arange(len(gain)), gain)
+    return _loudness(y / 10 ** (g / 20.0))
+
+
+def _render_track(job):
+    """(track, air warnings) for one job."""
+    if "hits" in job:
+        return render_hits(job["hits"], job["gain"], job["N"], seed=job["seed"],
+                           humanize=job["humanize"], until=job["until"]), []
+    from . import synth
+    singing = synth._fast.singing if synth._fast is not None else None
+    if singing is not None:
+        with singing.get_lock():
+            singing.value += 1
+    try:
+        singer = Singer(job["kind"], job["total"], **job["opts"])
+        singer.sing(job["units"], gain_db=job["gain"])
+        ys = singer.render(job["gain"])[:job["N"]]
+    finally:
+        if singing is not None:
+            with singing.get_lock():
+                singing.value -= 1
     return ys, [tuple(w) for w in singer.air_warnings]
 
 
-def _render_voices(jobs, use_cache=True, workers=None, progress=None):
+_POOL = None          # worker processes kept between renders (by the render server)
+
+
+def _warm_up(_i=0):
+    """Sing a tiny phrase so this process has loaded the compiled kernels
+    and built the wavetables before a real voice arrives."""
+    from .synth import SungNote, Unit
+    singer = Singer("tenor", 1.0, seed=1)
+    singer.sing([Unit(onset=["d"], nucleus=["u"], coda=["t"],
+                      notes=[SungNote(t0=0.2, t1=0.6, midi=60.0)])], gain_db=np.zeros(singer.n))
+    ys = singer.render(np.zeros(singer.n))
+    from . import synth
+    fast = synth._fast
+    if fast is not None:
+        # and the mixing kernels, as render_score calls them
+        mix = np.zeros((len(ys), 2))
+        cached = ys.copy()
+        cached.flags.writeable = False              # as voices come from the cache
+        for track in (ys, cached):
+            fast.parallel(fast.place, mix, track, np.float32(1.0), 0.7, 0.7, 1.4)
+            fast.parallel(fast.finite, track)
+        perc = ys.astype(float)
+        fast.parallel(fast.place, mix, perc, 1.0, 0.7, 0.7, 1.4)
+        perc.flags.writeable = False
+        fast.parallel(fast.place, mix, perc, 1.0, 0.7, 0.7, 1.4)
+        _part_loudness([ys], np.zeros(singer.n))
+        blocks = np.zeros((2, len(ys)), dtype=np.float32)
+        fast.parallel(fast.mono_blocks, mix, blocks, len(ys) // 2)
+        fast.parallel(fast.add_wet_blocks, mix, 0, blocks, len(ys) // 2, 0.25)
+        spec = np.zeros((2, 8), dtype=np.complex64)
+        fast.parallel(fast.times, spec, spec[0], np.empty_like(spec))
+        fast.parallel(fast.to_pcm, mix, 0.5 / (fast.parallel(fast.peak, mix) + 1e-9),
+                      np.empty((len(ys), 2), dtype=np.int16))
+    return os.getpid()
+
+
+def _join_pool(singing):
+    """A worker process starting: it shares with the others how many voices
+    are being sung, so each voice's kernels use its share of the cores, and
+    it goes when the process that started it does (however that ends)."""
+    import threading
+    from . import synth
+    if synth._fast is not None:
+        synth._fast.singing = singing
+    parent = os.getppid()
+
+    def watch():
+        while os.getppid() == parent:
+            time.sleep(1.0)
+        os._exit(0)
+    threading.Thread(target=watch, daemon=True).start()
+
+
+def keep_pool(workers=None, wait=True):
+    """Keep warmed-up worker processes for every later render in this
+    process.  wait=False returns at once: the warming up goes on meanwhile,
+    and voices sent to the pool before it's done start right after."""
+    global _POOL
+    import multiprocessing
+    import threading
+    if workers is None:
+        # a voice's kernels share the cores out among themselves: more
+        # processes than half the cores only cost memory
+        workers = max(2, min((os.cpu_count() or 2) // 2, 8))
+    _POOL = ProcessPoolExecutor(max_workers=workers, initializer=_join_pool,
+                                initargs=(multiprocessing.Value("i", 0),))
+    warming = [_POOL.submit(_warm_up, k) for k in range(workers)]
+    if wait:
+        _warm_up()
+        for f in warming:
+            f.result()
+    else:
+        threading.Thread(target=_warm_up, daemon=True).start()
+
+
+def close_pool():
+    """Stop the worker processes now (even mid-render)."""
+    global _POOL
+    if _POOL is None:
+        return
+    for proc in list((getattr(_POOL, "_processes", None) or {}).values()):
+        proc.kill()
+    _POOL.shutdown(wait=False, cancel_futures=True)
+    _POOL = None
+
+
+def _render_voices(jobs, use_cache=True, workers=None, progress=None, part_gains=None):
     """Every singer's track, in order: from the cache when nothing that goes
     into it changed, otherwise rendered, several at once.  progress(done,
-    to_sing, unchanged) is called as voices finish."""
+    to_sing, unchanged) is called as voices finish.  part_gains[i], if not
+    None, is the dynamics curve of a part sung by jobs[i] alone: its
+    loudness is measured as soon as it's sung (and goes into the cache, or
+    into the list returned last).
+    Returns (tracks, voices unchanged, cache keys, loudnesses)."""
     keys = [cache.voice_key(j) for j in jobs] if use_cache else [None] * len(jobs)
+    part_gains = part_gains or [None] * len(jobs)
+    louds = [None] * len(jobs)
     out = [cache.load(k) if k else None for k in keys]
     todo = [i for i, r in enumerate(out) if r is None]
+    todo.sort(key=lambda i: "hits" in jobs[i])        # voices first: they take longest
+    is_voice = ["hits" not in j for j in jobs]
+    voices_todo = sum(is_voice[i] for i in todo)
     if not workers:
         # a voice needs about 130 bytes per sample while it renders: run as
         # many at once as fit in half the memory
@@ -161,29 +334,53 @@ def _render_voices(jobs, use_cache=True, workers=None, progress=None):
             ram = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
         except (ValueError, OSError, AttributeError):
             ram = 8 * 1024 ** 3
-        per_voice = 130 * max((j["N"] for j in jobs), default=1)
+        from . import synth
+        per_voice = (60 if synth._fast is not None else 130) * max((j["N"] for j in jobs), default=1)
         workers = max(1, min(os.cpu_count() or 1, int(0.5 * ram / per_voice)))
     workers = min(len(todo), workers)
-    unchanged = len(jobs) - len(todo)
-    if progress:
-        progress(0, len(todo), unchanged)
-    if workers > 1:
-        with ProcessPoolExecutor(max_workers=workers) as ex:
-            running = {ex.submit(_render_voice, jobs[i]): i for i in todo}
-            for k, f in enumerate(as_completed(running), 1):
-                out[running[f]] = f.result()
-                if progress:
-                    progress(k, len(todo), unchanged)
-    else:
-        for k, i in enumerate(todo, 1):
-            out[i] = _render_voice(jobs[i])
+    unchanged = sum(is_voice) - voices_todo
+    sung = 0
+
+    def finished(i, result):
+        nonlocal sung
+        ys, air, ref = result
+        if ys is None:                              # the worker put it in the cache
+            ys, air = cache.load(keys[i]) or _render_track(jobs[i])
+        out[i] = (ys, air)
+        if ref is not None:
+            louds[i] = ref
+            if keys[i]:
+                cache.store_value(cache.part_key([keys[i]], part_gains[i]), ref)
+        if is_voice[i]:
+            sung += 1
             if progress:
-                progress(k, len(todo), unchanged)
-    if use_cache:
+                progress(sung, voices_todo, unchanged)
+
+    if progress:
+        progress(0, voices_todo, unchanged)
+    if _POOL is not None and todo:
+        running = {_POOL.submit(_render_voice, jobs[i], keys[i], part_gains[i]): i for i in todo}
+        for f in as_completed(running):
+            finished(running[f], f.result())
+    elif workers > 1:
+        # with the compiled synthesizer a voice's heavy lifting releases the
+        # interpreter lock, so threads in this process do: no process to
+        # start, nothing to copy back.  Otherwise separate processes.
+        from . import synth
+        pool = ThreadPoolExecutor if synth._fast is not None else ProcessPoolExecutor
+        with pool(max_workers=workers) as ex:
+            running = {ex.submit(_render_voice, jobs[i], None, part_gains[i]): i for i in todo}
+            for f in as_completed(running):
+                finished(running[f], f.result())
+    else:
         for i in todo:
-            cache.store(keys[i], *out[i])
+            finished(i, _render_voice(jobs[i], None, part_gains[i]))
+    if use_cache:
+        if _POOL is None:
+            for i in todo:
+                cache.store(keys[i], *out[i])
         cache.prune()
-    return out, len(jobs) - len(todo)
+    return out, unchanged, keys, louds
 
 
 def render_score(path, out=None, bpm=None, tempo_scale=1.0, lang="auto", voices=None,
@@ -287,7 +484,18 @@ def render_score(path, out=None, bpm=None, tempo_scale=1.0, lang="auto", voices=
             opts = {k2: float(v) if isinstance(v, np.floating) else v for k2, v in opts.items()}
             jobs.append((spread, dict(kind=kind, total=total, N=N, units=units, gain=gain,
                                       opts=opts)))
-        parts.append((st, name, kind, is_solo, units, hits, gain, seed, jobs))
+        perc_job = None
+        if hits:
+            # vocal percussion (x-noteheads): one track per part, not per singer
+            until = []
+            for h in hits:
+                nxt = next((u for u in units if u.t_on > h.t_on + 0.005), None)
+                # silent again just before the next sung syllable's consonant
+                until.append(None if nxt is None else
+                             nxt.t_on - sum(Singer.cons_dur(c) for c in nxt.onset) - 0.012)
+            perc_job = dict(hits=hits, gain=gain, N=N, seed=seed + 31, humanize=humanize,
+                            until=until)
+        parts.append((st, name, kind, is_solo, units, hits, gain, seed, jobs, perc_job))
 
     def sung_so_far(done, to_sing, unchanged):
         if not to_sing:
@@ -298,20 +506,36 @@ def render_score(path, out=None, bpm=None, tempo_scale=1.0, lang="auto", voices=
             left = f"Singing {to_sing} voice" + ("s" if to_sing > 1 else "")
         say(left + (f", {unchanged} unchanged" if unchanged else ""))
 
-    sung, reused = _render_voices([j for p in parts for _s, j in p[-1]], use_cache, workers,
-                                  sung_so_far)
+    voice_jobs = [j for p in parts for _s, j in p[-2]]
+    perc_jobs = [p[-1] for p in parts if p[-1] is not None]
+    # a part of one voice has its loudness measured as soon as it's sung
+    part_gains = [p[6] if len(p[-2]) == 1 else None for p in parts for _j in p[-2]]
+    sung, reused, voice_keys, louds = _render_voices(
+        voice_jobs + perc_jobs, use_cache, workers, sung_so_far,
+        part_gains + [None] * len(perc_jobs))
     say("Mixing")
-    sung = iter(sung)
-    for st, name, kind, is_solo, units, hits, gain, seed, jobs in parts:
+    perc_tracks = iter(ys for ys, _air in sung[len(voice_jobs):])
+    sung = iter(sung[:len(voice_jobs)])
+    voice_keys = iter(voice_keys)
+    louds = iter(louds)
+    from . import synth
+    fast = synth._fast
+    root2 = np.sqrt(2)
+    for st, name, kind, is_solo, units, hits, gain, seed, jobs, perc_job in parts:
         nm = st.name.lower()
         voices_out = []
+        keys = []
+        measured = None
         for s, (spread, _job) in enumerate(jobs):
             ys, air = next(sung)
+            keys.append(next(voice_keys))
+            measured = next(louds)
             if s == 0:
                 for w in air:
                     air_warn.append((name, gain) + tuple(w))
-            bad = ~np.isfinite(ys)
-            if bad.any():           # never let one bad sample ruin the file
+            if not _finite(ys):                              # a NaN or inf somewhere
+                bad = ~np.isfinite(ys)
+                # never let one bad sample ruin the file
                 ys = np.where(bad, 0.0, ys)
                 warnings.append(f"{name}: {int(bad.sum())} invalid samples silenced (please report)")
             voices_out.append((spread, ys))
@@ -322,49 +546,88 @@ def render_score(path, out=None, bpm=None, tempo_scale=1.0, lang="auto", voices=
         if focus:
             part_db += 4.0 if _match(nm, focus) else -9.0
         pan0 = _pan(staff_names.index(st.name), len(staff_names), st.name, kind)
-        stem = stem_sigs.setdefault(st.name, np.zeros(N))
+        stem = stem_sigs.setdefault(st.name, np.zeros(N)) if stems else None
 
-        def place(ys, pan):
+        def place(ys, pan, scale=1.0):
             lg, rg = np.cos((pan + 1) * np.pi / 4), np.sin((pan + 1) * np.pi / 4)
-            mix[:len(ys), 0] += ys * lg * np.sqrt(2)
-            mix[:len(ys), 1] += ys * rg * np.sqrt(2)
+            if fast is not None:
+                fast.parallel(fast.place, mix, ys, ys.dtype.type(scale), lg, rg, root2)
+            else:
+                ys = ys * scale
+                mix[:len(ys), 0] += ys * lg * root2
+                mix[:len(ys), 1] += ys * rg * root2
 
         if voices_out:
-            y = np.sum([v for _s, v in voices_out], axis=0)
             # every part is calibrated to the same loudness at 'f' (0 dB); the
             # dynamics curve already applied inside render() sets the real level
-            g = np.interp(np.arange(len(y)) / SR * CR, np.arange(len(gain)), gain)
-            ref = _loudness(y / 10 ** (g / 20.0))
+            pkey = cache.part_key(keys, gain) if use_cache and all(keys) else None
+            ref = measured if len(jobs) == 1 else None      # (only ever of a clean voice)
+            if ref is None and pkey:
+                ref = cache.load_value(pkey)
+            y = None
+            if ref is None:
+                ref = _part_loudness([v for _s, v in voices_out], gain)
+                if pkey:
+                    cache.store_value(pkey, ref)
             scale = PART_REF / ref * 10 ** (part_db / 20.0)
             for spread, ys in voices_out:
-                place(ys * scale, float(np.clip(pan0 + 0.12 * spread, -1.0, 1.0)))
-            y = y * scale
-            stem[:len(y)] += y
-        if hits:
-            # vocal percussion (x-noteheads): one track per part, not per singer
-            until = []
-            for h in hits:
-                nxt = next((u for u in units if u.t_on > h.t_on + 0.005), None)
-                # silent again just before the next sung syllable's consonant
-                until.append(None if nxt is None else
-                             nxt.t_on - sum(Singer.cons_dur(c) for c in nxt.onset) - 0.012)
-            yp = render_hits(hits, gain, N, seed=seed + 31, humanize=humanize, until=until)
-            yp *= 10 ** (part_db / 20.0)
+                place(ys, float(np.clip(pan0 + 0.12 * spread, -1.0, 1.0)), scale)
+            if stems:
+                if y is None:
+                    y = np.sum([v for _s, v in voices_out], axis=0)
+                y = y * scale
+                stem[:len(y)] += y
+        if perc_job is not None:
+            yp = next(perc_tracks) * 10 ** (part_db / 20.0)
             place(yp, pan0)
-            stem += yp
+            if stems:
+                stem += yp
         rendered.append((name, kind, len(units), n_sing, len(hits)))
 
-    if reverb > 0:
-        ir = _reverb_ir()
-        mono = mix.mean(axis=1)
-        wet = np.stack([oaconvolve(mono, ir[:, c])[:N] for c in range(2)], axis=1)
-        mix = mix + wet * reverb * 0.9
-    peak = np.max(np.abs(mix)) + 1e-9
+    if reverb > 0 and fast is not None:
+        # the room: the mono mix through each channel's impulse response, a
+        # block of the song at a time (the forward transforms shared by both
+        # channels, all the blocks at once on every core), the blocks' tails
+        # overlapping the blocks after them.  In single precision, which is
+        # still far finer than the 16-bit file, and quicker: the transforms
+        # are as fast as memory.
+        m = REVERB_BLOCK
+        width = next_fast_len(m + _reverb_ir().shape[0] - 1, real=True)
+        blocks = np.zeros(((N + m - 1) // m, width), dtype=np.float32)
+        fast.parallel(fast.mono_blocks, mix, blocks, m)
+        spec = rfft(blocks, axis=1, workers=-1)
+        del blocks
+        heard = np.empty_like(spec)
+        for c, room in enumerate(_reverb_spectrum(width, np.float32)):
+            fast.parallel(fast.times, spec, room, heard)
+            wet = irfft(heard, width, axis=1, workers=-1, overwrite_x=True)
+            fast.parallel(fast.add_wet_blocks, mix, c, wet, m, float(reverb))
+        del spec, heard, wet
+    elif reverb > 0:
+        # the same, the whole song as one block
+        L = next_fast_len(N + _reverb_ir().shape[0] - 1, real=True)
+        spec = rfft(mix.mean(axis=1), L, workers=-1)
+        for c, room in enumerate(_reverb_spectrum(L)):
+            wet = irfft(spec * room, L, workers=-1)[:N]
+            mix[:, c] += wet * reverb * 0.9
+        del spec, wet
+    if fast is not None:
+        peak = fast.parallel(fast.peak, mix) + 1e-9
+    else:
+        peak = max(float(mix.max()), -float(mix.min())) + 1e-9
     gain_norm = 0.89 / peak
-    mix *= gain_norm
 
     out = Path(out) if out else path.with_suffix(".mp3")
-    _write_audio(out, mix)
+    pcm = None
+    if fast is not None:
+        pcm = np.empty((N, 2), dtype=np.int16)
+        if not fast.parallel(fast.to_pcm, mix, gain_norm, pcm):
+            pcm = None
+    if pcm is None:
+        mix *= gain_norm
+        _write_audio(out, mix, finite=bool(np.isfinite(peak)), scratch=True)
+    else:
+        _write_pcm(out, pcm)
     if stems:
         for nm, sig in stem_sigs.items():
             safe = "".join(c if c.isalnum() or c in " -_" else "_" for c in nm).strip()
@@ -372,7 +635,7 @@ def render_score(path, out=None, bpm=None, tempo_scale=1.0, lang="auto", voices=
             _write_audio(st_out, np.stack([sig, sig], axis=1) * gain_norm)
 
     if not quiet:
-        n_voices = sum(len(p[-1]) for p in parts)
+        n_voices = sum(len(p[-2]) for p in parts)
         again = f", {reused} of {n_voices} voices unchanged" if reused else ""
         print(f"{score.title}: {total - PREROLL - TAIL:.1f}s of music, "
               f"rendered in {time.time() - t_start:.1f}s{again} -> {out}")

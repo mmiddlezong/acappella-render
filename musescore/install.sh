@@ -41,6 +41,13 @@ if ! "$PY" -c "import numpy, scipy, cmudict" 2>/dev/null; then
     echo "$PY can't import numpy/scipy/cmudict; install the renderer's requirements first (see README)." >&2
     exit 1
 fi
+# the compiled synthesizer: compiled now (it's kept), not during the first render
+if "$PY" -c "import numba" 2>/dev/null; then
+    echo "Compiling the synthesizer..."
+    (cd "$REPO" && "$PY" -c "from acappella import render; render._warm_up()")
+else
+    echo "Note: 'pip install numba' makes renders several times faster." >&2
+fi
 
 # the VST 3 SDK (MIT licensed), just the parts the effect needs
 [ -d "$SDK/.git" ] || git clone --depth 1 https://github.com/steinbergmedia/vst3sdk.git "$SDK"

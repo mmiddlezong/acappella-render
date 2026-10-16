@@ -106,6 +106,7 @@ _AH_VOCABLES = {"dat", "bam", "dam", "dan", "ban", "bat", "pap", "wap", "tat", "
                 "dahm", "bahm"}
 
 
+@lru_cache(maxsize=65536)
 def _norm(token: str) -> str:
     t = unicodedata.normalize("NFKC", token).strip().lower()
     t = re.sub(r"[\"'“”‘’`.,!?;:()\[\]{}…\-–—_~*]", "", t)
@@ -625,6 +626,7 @@ def _is_hangul(c: str) -> bool:
     return "가" <= c <= "힣"
 
 
+@lru_cache(maxsize=65536)
 def has_hangul(text: str) -> bool:
     return any(_is_hangul(c) or c in _K_JAMO_HUM for c in text)
 
@@ -974,6 +976,7 @@ def _is_kana(c: str) -> bool:
     return "぀" <= c <= "ヿ"
 
 
+@lru_cache(maxsize=65536)
 def classify(text: str) -> str:
     if has_hangul(text):
         return "hangul"

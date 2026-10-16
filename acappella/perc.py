@@ -5,6 +5,8 @@ mouth, the way a beatboxer's "pf", "b" or "ts" is made.  The sound stops
 when the singer has to start the next sung note."""
 from __future__ import annotations
 
+from functools import lru_cache
+
 import numpy as np
 from scipy.signal import butter, sosfilt
 
@@ -15,8 +17,13 @@ KIND_LEVEL = {"snare": 1.0, "kick": 1.2, "hat": 0.45}
 REF = 0.12                       # a sung part's calibrated loudness (render.py)
 
 
+@lru_cache(maxsize=256)
+def _band_sos(order, lo, hi):
+    return butter(order, [lo, hi], btype="band", fs=SR, output="sos")
+
+
 def _band(x, lo, hi, order=2):
-    return sosfilt(butter(order, [lo, hi], btype="band", fs=SR, output="sos"), x)
+    return sosfilt(_band_sos(order, lo, hi), x)
 
 
 def _res(x, fc, bw):
@@ -47,7 +54,8 @@ def _fade(x, frac=0.35):
 def _norm(x):
     """Scale so the loudest 50 ms has RMS 1."""
     n = min(len(x), int(0.05 * SR))
-    p = np.convolve(x ** 2, np.ones(n) / n, mode="valid")
+    c = np.cumsum(x ** 2)
+    p = (c[n - 1:] - np.concatenate(([0.0], c[:-n]))) / n     # every 50 ms window's mean
     return x / np.sqrt(max(float(p.max()), 1e-12))
 
 

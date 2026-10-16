@@ -21,7 +21,8 @@ off:
 """
 from __future__ import annotations
 
-import copy
+import pickle
+from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from dataclasses import dataclass
 
@@ -32,6 +33,11 @@ try:  # scipy's compiled core, ~15x less overhead per call than sosfilt()
     from scipy.signal._sosfilt import _sosfilt as _sosfilt_fast
 except Exception:  # pragma: no cover
     _sosfilt_fast = None
+
+try:  # the per-sample work compiled (several times faster); numpy otherwise
+    from . import fastsynth as _fast
+except ImportError:  # pragma: no cover
+    _fast = None
 
 SR = 44100
 CR = 1000.0          # control frames per second
@@ -247,6 +253,16 @@ def _glottal_tables():
     return out
 
 
+_FAST_TABLES = None
+
+
+def _fast_tables():
+    global _FAST_TABLES
+    if _FAST_TABLES is None:
+        _FAST_TABLES = _fast.table_stack(_glottal_tables(), _Q_LEVELS)
+    return _FAST_TABLES
+
+
 def _hann_smooth(x: np.ndarray, frames: int) -> np.ndarray:
     if frames <= 1:
         return x
@@ -255,6 +271,11 @@ def _hann_smooth(x: np.ndarray, frames: int) -> np.ndarray:
     pad = frames
     xp = np.concatenate([np.full(pad, x[0]), x, np.full(pad, x[-1])])
     return np.convolve(xp, w, mode="same")[pad:-pad]
+
+
+def _clamp(x, lo, hi):
+    """np.clip for one number (without numpy's overhead)."""
+    return min(max(x, lo), hi)
 
 
 def _damping(z: float, interval: float) -> float:
@@ -266,8 +287,10 @@ def _var_smooth(x: np.ndarray, W: np.ndarray, passes: int = 2) -> np.ndarray:
     """Centered moving average whose half-width W[i] (frames) changes along
     the track.  Two passes give a triangular kernel: wide windows in vowels
     make slow, rounded transitions, narrow ones in consonants quick ones."""
-    n = len(x)
     W = np.asarray(W, dtype=np.int64)
+    if _fast is not None:
+        return _fast.var_smooth(np.ascontiguousarray(x, dtype=np.float64), W, passes)
+    n = len(x)
     pad = int(W.max()) + 1
     idx = np.arange(n) + pad
     lo = idx - W
@@ -329,7 +352,7 @@ class Singer:
 
     # ---------------------------------------------------------- helpers
     def _i(self, t: float) -> int:
-        return int(np.clip(round(t * CR), 0, self.n - 1))
+        return int(_clamp(round(t * CR), 0, self.n - 1))
 
     def _span(self, a: float, b: float):
         return slice(self._i(a), max(self._i(a) + 1, self._i(b)))
@@ -383,7 +406,7 @@ class Singer:
     def _gain_at(self, t: float) -> float:
         if self.gain is None or len(self.gain) == 0:
             return -5.0
-        return float(self.gain[int(np.clip(round(t * CR), 0, len(self.gain) - 1))])
+        return float(self.gain[int(_clamp(round(t * CR), 0, len(self.gain) - 1))])
 
     @staticmethod
     def cons_dur(c: str) -> float:
@@ -533,7 +556,7 @@ class Singer:
             else:
                 self.SW[sl] = W_LIQUID
             if final:
-                r = float(np.clip(0.5 * d, 0.03, 0.08))
+                r = float(_clamp(0.5 * d, 0.03, 0.08))
                 self._rcos(self.AV, b - r, b, av, 0.0)
         elif c in ("h", "x"):
             self.AV[sl] = 0.0
@@ -576,24 +599,24 @@ class Singer:
         prev = None
         for u in units:
             n0 = u.notes[0]
-            d = float(np.clip(rng.normal(0.0, 0.007 * h), -0.018 * h, 0.018 * h))
+            d = float(_clamp(rng.normal(0.0, 0.007 * h), -0.018 * h, 0.018 * h))
             if prev is not None and abs(prev.notes[-1].t1 - n0.t0) < 0.006:
                 p = prev.notes[-1]
                 lim = 0.25 * min(p.t1 - p.t0, n0.t1 - n0.t0)
-                d = float(np.clip(d, -lim, lim))
+                d = float(_clamp(d, -lim, lim))
                 p.t1 += d
             else:
-                d = float(np.clip(d, -0.25 * (n0.t1 - n0.t0), 0.25 * (n0.t1 - n0.t0)))
+                d = float(_clamp(d, -0.25 * (n0.t1 - n0.t0), 0.25 * (n0.t1 - n0.t0)))
             n0.t0 = max(0.0, n0.t0 + d)
             for note in u.notes:
-                note.midi += float(np.clip(rng.normal(0.0, 0.03 * h), -0.08, 0.08))
+                note.midi += float(_clamp(rng.normal(0.0, 0.03 * h), -0.08, 0.08))
             prev = u
 
     # -------------------------------------------------------- writing
     def sing(self, units: list[Unit], gain_db: np.ndarray | None = None):
         # mouth percussion hits: no breath can be taken while making one
         self.busy = sorted((u.t_on - 0.01, u.t_on + 0.12) for u in units if u.perc)
-        units = copy.deepcopy([u for u in units if not u.perc])
+        units = pickle.loads(pickle.dumps([u for u in units if not u.perc], 5))   # a deep copy
         self.gain = gain_db
         pitches = [nt.midi for u in units for nt in u.notes]
         self.mid_pitch = float(np.median(pitches)) if pitches else 60.0
@@ -619,7 +642,7 @@ class Singer:
         hum = nuc_son[0] if (not vowels and nuc_son) else None
         ref_vowel = main or "@"
         joined_in = prev is not None and prev.joined_next
-        qd = float(np.clip((self._gain_at(u.t_on) + 22) / 26, 0, 1))
+        qd = float(_clamp((self._gain_at(u.t_on) + 22) / 26, 0, 1))
 
         # onset consonants
         t = u.c_start
@@ -689,7 +712,7 @@ class Singer:
         if not u.joined_next and (not coda or coda[-1] in SONORANT_F):
             gap_after = (nxt.c_start - off) if nxt is not None else 9.0
             if not coda:
-                r = min(float(np.clip(0.3 * span, 0.035, 0.09)), 0.5 * span)
+                r = min(float(_clamp(0.3 * span, 0.035, 0.09)), 0.5 * span)
                 lvl = self.AV[self._i(off - r)]
                 self._rcos(self.AV, off - r, off, lvl, 0.0)
                 self._rcos(self.bloom, off - r, off, 1.0, 0.5)
@@ -798,9 +821,9 @@ class Singer:
     def _coda_len(self, c, span, cluster=False):
         c0 = UNRELEASED.get(c, c)
         if c0 in SONORANT_DUR and c0 in NASAL_ZERO:
-            return float(np.clip(0.25 * span, 0.06, 0.30))
+            return float(_clamp(0.25 * span, 0.06, 0.30))
         if c0 in SONORANT_DUR:
-            return float(np.clip(0.2 * span, 0.05, 0.20))
+            return float(_clamp(0.2 * span, 0.05, 0.20))
         if c in UNRELEASED:
             return 0.03 if cluster else 0.05
         if c0 in STOP:
@@ -832,7 +855,7 @@ class Singer:
                 tc += self.cons_dur(c) * u.c_scale
             nl = max(0.02, (first.t1 if len(notes) > 1 else off) - t_on)
             gap = u.c_start - (prev.eff_off if prev is not None else -1.0)
-            scoop = self.scoop_cents * float(np.clip(nl / 0.4, 0.35, 1.0))
+            scoop = self.scoop_cents * float(_clamp(nl / 0.4, 0.35, 1.0))
             if gap < 0.25:
                 scoop *= 0.5
             if u.accent > 0.5:
@@ -843,7 +866,7 @@ class Singer:
             # arrives (nearly) in tune; it may start bending the end of the
             # previous note, but not its first half
             pn = prev.notes[-1]
-            T = float(np.clip(0.4 * (t_on - u.c_start), 0.018, 0.035))
+            T = float(_clamp(0.4 * (t_on - u.c_start), 0.018, 0.035))
             earliest = max(pn.t0 + 0.5 * (pn.t1 - pn.t0), prev.t_on + 0.03)
             ts = max(earliest, t_on - 1.4 * T)
             z = _damping(0.8, m0 - pn.midi)
@@ -852,7 +875,7 @@ class Singer:
             # slurred: the glide is centred on the note change
             pn = prev.notes[-1]
             dl = min(pn.t1 - pn.t0, first.t1 - first.t0)
-            T = float(np.clip(0.1 * dl, 0.02, 0.035))
+            T = float(_clamp(0.1 * dl, 0.02, 0.035))
             self.pplan.append((t_on - 0.8 * T, m0, T, _damping(0.75, m0 - pn.midi), False, 0.0))
         else:
             # a vowel re-sung without a slur: a quick move through the
@@ -863,7 +886,7 @@ class Singer:
         for j, note in enumerate(notes):
             if j > 0:
                 dl = min(notes[j - 1].t1 - notes[j - 1].t0, note.t1 - note.t0)
-                T = float(np.clip(0.1 * dl, 0.02, 0.035))
+                T = float(_clamp(0.1 * dl, 0.02, 0.035))
                 z = _damping(0.75, note.midi - notes[j - 1].midi)
                 self.pplan.append((note.t0 - 0.8 * T, note.midi + det, T, z, False, 0.0))
             if note.gliss and j + 1 < len(notes):
@@ -892,15 +915,15 @@ class Singer:
                 d0, start = a + 0.06, 0.5 * prev_depth
                 d1 = d0 + 0.18
             else:
-                d0, start = a + float(np.clip(0.2 + 0.2 * nl, 0.28, 0.45)), 0.0
-                d1 = d0 + float(np.clip(0.35 * nl, 0.2, 0.5))
+                d0, start = a + float(_clamp(0.2 + 0.2 * nl, 0.28, 0.45)), 0.0
+                d1 = d0 + float(_clamp(0.35 * nl, 0.2, 0.5))
             held = b - d0
             if held < 0.3:
                 # not enough time for a couple of full cycles: a lone wobble
                 # sounds like a wrong pitch, so stay straight
                 prev_depth = 0.0
                 continue
-            depth *= float(np.clip((held - 0.3) / 0.4 + 0.4, 0.4, 1.0))
+            depth *= float(_clamp((held - 0.3) / 0.4 + 0.4, 0.4, 1.0))
             d1 = min(d1, b)
             self.vib[self._span(a, d0)] = start
             self._rcos(self.vib, d0, d1, start, depth)
@@ -930,7 +953,7 @@ class Singer:
         y, v = tgt, 0.0
         i_cur = 0
         for (t, m, T, zeta, reset, scoop) in ev:
-            i = int(np.clip(round(t * CR), 0, n))
+            i = int(_clamp(round(t * CR), 0, n))
             if i > i_cur:
                 k = i - i_cur
                 tt = np.arange(k + 1) * dt
@@ -1043,8 +1066,8 @@ class Singer:
                     flow = taken / (t1 - t0)
                 if t1 - t0 >= 0.04 and taken > 0.02:
                     if self.breaths > 0:
-                        amp = BREATH_AMP * self.breaths * float(np.clip((flow / 0.9) ** 0.7, 0.25, 2.2))
-                        bright = float(np.clip((flow - 0.8) / 1.6, 0.0, 1.0))
+                        amp = BREATH_AMP * self.breaths * float(_clamp((flow / 0.9) ** 0.7, 0.25, 2.2))
+                        bright = float(_clamp((flow - 0.8) / 1.6, 0.0, 1.0))
                         self.breath_ev.append((t0, t1, amp, bright))
                 else:
                     taken = 0.0
@@ -1078,10 +1101,15 @@ class Singer:
         N = int(self.dur * SR) + BLOCK
         # --- smooth control tracks (coarticulation: speed depends on the sound)
         W = self.SW
-        for k in range(5):
-            self.F[k] = _var_smooth(self.F[k], W)
-            self.B[k] = _var_smooth(self.B[k], W)
-        self.NZ = _var_smooth(self.NZ, W)
+        if _fast is not None:
+            tracks = _fast.parallel(_fast.var_smooth_rows, np.vstack([self.F, self.B, self.NZ]),
+                                    np.asarray(W, dtype=np.int64), 2)
+            self.F[:], self.B[:], self.NZ = tracks[:5], tracks[5:10], tracks[10]
+        else:
+            for k in range(5):
+                self.F[k] = _var_smooth(self.F[k], W)
+                self.B[k] = _var_smooth(self.B[k], W)
+            self.NZ = _var_smooth(self.NZ, W)
         # the tongue and jaw are never perfectly still: vowel colour wanders
         # by about a percent
         for k in range(3):
@@ -1105,6 +1133,8 @@ class Singer:
         self.F[2] = np.maximum(self.F[2], self.F[1] + 300)
         opening = _hann_smooth(self.bloom, 8)       # how far the voice has opened
         AV = AV * self._level_comp(f0_ctrl, AV)
+        if _fast is not None:
+            return self._render_fast(N, midi, AV, AH, opening, gain_db)
 
         # --- sample-rate tracks (each full-length array is dropped once it's
         # last used: a voice is long, and several are rendered at once)
@@ -1162,6 +1192,50 @@ class Singer:
         y *= 10 ** (lvl / 20.0)
         return y.astype(np.float32)
 
+    def _render_fast(self, N, midi, AV, AH, opening, gain_db):
+        """render()'s sample-rate part with fastsynth's kernels: the same
+        arithmetic and the same random numbers, drawn in the same order."""
+        n = self.n
+        dp = np.clip(midi - self.mid_pitch, -12.0, 12.0)
+        lvl_c = gain_db + _hann_smooth(self.accent_db, 6) + np.clip(0.1 * dp, -1.5, 1.5)
+        ctrl = [np.ascontiguousarray(a, dtype=np.float64) for a in (
+            midi, _hann_smooth(self.vib, 60), _hann_smooth(self.cents, 10),
+            _hann_smooth(self.vrate, 150), AV, AH, opening, lvl_c, self.qoff + 0.008 * dp)]
+        assert all(len(a) == n for a in ctrl)
+        u1 = self.rng.uniform(0, 6)
+        u2 = self.rng.uniform(0, 2 * np.pi)
+        pts = []
+        for hz in (1.2, 4.0, 60.0, 30.0):           # drift, drift, jitter, shimmer
+            pts.append(self.rng.standard_normal(max(2, int(N / SR * hz) + 2)))
+        nb = N // BLOCK
+        # The rest of the random numbers (the breath noise, then the
+        # consonants' and breaths' own) are drawn in a second thread, in
+        # that order, while this one works out the pitch and the source.
+        with ThreadPoolExecutor(max_workers=1) as draws:
+            noise = draws.submit(self.rng.standard_normal, N)
+            extras = draws.submit(lambda: (self._frication(N), self._breath_noise(N)))
+            x = np.empty(N)
+            fmax = np.empty((N + _fast.STEP - 1) // _fast.STEP)
+            _fast.parallel(_fast.glottal_phase, N, float(SR), CR, *ctrl[:4], u1, u2, *pts[:3],
+                           x, fmax)
+            gain = np.empty(N)
+            active = np.empty(nb, dtype=np.bool_)
+            _fast.parallel(_fast.excitation, N, float(SR), CR, *ctrl[4:], pts[3], noise.result(),
+                           self.breathiness, _fast_tables(), _CLOSE_PHASE, BLOCK, fmax, x, gain,
+                           active)
+            noise = None
+            ring = np.convolve(active.astype(float), np.ones(40), mode="full")[:nb] > 0
+            y = np.zeros(N)
+            _fast.parallel(_fast.cascade, x, np.ascontiguousarray(self.F),
+                           np.ascontiguousarray(self.B), np.ascontiguousarray(self.NZ),
+                           float(SR), CR, ring, BLOCK, y)
+            del x
+            fric, breath = extras.result()
+        out = np.empty(N, dtype=np.float32)
+        _fast.finish(y, _PRESENCE, fric, 10 ** (0.27 * (self.mid_pitch - 55.0) / 20.0),
+                     breath, gain, out)
+        return out
+
     def _level_comp(self, f0, AV, hop=10):
         """Per-frame gain that cancels the accident of a harmonic landing on
         (or between) formant peaks, so a vowel's loudness doesn't jump around
@@ -1199,6 +1273,15 @@ class Singer:
                 out = out * (d / A ** 2 if zero else A ** 2 / d)
             return out
 
+        if _fast is not None:
+            Ph, Pc = _fast.parallel(_fast.level_powers, np.ascontiguousarray(f0s),
+                                    np.ascontiguousarray(F), np.ascontiguousarray(B),
+                                    np.ascontiguousarray(NZ), amps ** 2,
+                                    np.linspace(40, 5000, 160), T)
+            c = np.sqrt(Pc / np.maximum(Ph, 1e-12))
+            comp[on] = np.clip(c, 0.5, 2.0)
+            comp = np.interp(np.arange(self.n), fr, comp)
+            return _hann_smooth(comp, 40)
         K = 64
         k = np.arange(1, K + 1)[None, :]
         fh = f0s[:, None] * k

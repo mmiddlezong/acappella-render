@@ -251,8 +251,17 @@ class MuseTimeMap:
             self.runs.append((ticks(u0), tick0, t - ct))
             t += tempo_map.tick2time(tick0 + length, multiplier) - ct
         self._u = [r[0] for r in self.runs]
+        self._seen = {}
 
     def sec(self, pos, before_pause=False) -> float:
+        # every part asks about the same few thousand positions
+        key = (pos, before_pause)
+        t = self._seen.get(key)
+        if t is None:
+            t = self._seen[key] = self._sec(pos, before_pause)
+        return t
+
+    def _sec(self, pos, before_pause):
         u = F(pos) * WHOLE
         if before_pause:            # a note ending here: before a pause at this tick
             i = max(0, bisect.bisect_left(self._u, u) - 1)

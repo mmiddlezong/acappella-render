@@ -5,20 +5,22 @@ the syllables and notes it sings, its dynamics curve, the singer's settings,
 the length of the render, and the synthesizer's own code (so changing the
 synthesizer never reuses a stale voice).  Mixing (balance, panning, reverb)
 happens afterwards, so a voice is reused even when only those change.
-Tracks are float32, exactly what a fresh render would produce.
+Tracks are stored exactly as a fresh render produces them (a voice is
+float32; a part's percussion track, kept the same way, float64).
 """
 from __future__ import annotations
 
-import dataclasses
 import hashlib
 import json
 import os
+import pickle
 import sys
+import threading
 from pathlib import Path
 
 import numpy as np
 
-CACHE_VERSION = 1
+CACHE_VERSION = 2
 LIMIT_BYTES = 3 * 1024 ** 3        # oldest voices are dropped beyond this
 
 
@@ -42,69 +44,106 @@ def _code_fingerprint() -> bytes:
         import scipy
 
         here = Path(__file__).resolve().parent
-        h = hashlib.sha256(f"v{CACHE_VERSION} np{np.__version__} sp{scipy.__version__}".encode())
-        for name in ("synth.py", "render.py"):
+        from . import synth
+
+        fast = "numba" if synth._fast is not None else "numpy"
+        h = hashlib.sha256(f"v{CACHE_VERSION} np{np.__version__} sp{scipy.__version__} {fast}".encode())
+        for name in ("synth.py", "fastsynth.py", "perc.py", "render.py"):
             h.update((here / name).read_bytes())
         _CODE = h.digest()
     return _CODE
 
 
-def _feed(h, obj):
-    """Hash a value by content (dataclasses, lists, arrays, numbers, text)."""
-    if isinstance(obj, np.ndarray):
-        h.update(f"A{obj.dtype}{obj.shape}".encode())
-        h.update(np.ascontiguousarray(obj).tobytes())
-    elif dataclasses.is_dataclass(obj) and not isinstance(obj, type):
-        h.update(f"D{type(obj).__name__}".encode())
-        for f in dataclasses.fields(obj):
-            h.update(f.name.encode())
-            _feed(h, getattr(obj, f.name))
-    elif isinstance(obj, (list, tuple)):
-        h.update(f"L{type(obj).__name__}{len(obj)}".encode())
-        for x in obj:
-            _feed(h, x)
-    elif isinstance(obj, dict):
-        h.update(f"M{len(obj)}".encode())
-        for k in sorted(obj, key=repr):
-            _feed(h, k)
-            _feed(h, obj[k])
-    elif isinstance(obj, float):
-        h.update(b"F" + obj.hex().encode())
-    elif isinstance(obj, (bool, int, str, type(None))):
-        h.update(f"{type(obj).__name__}:{obj!r}".encode())
-    else:
-        raise TypeError(f"can't fingerprint {type(obj).__name__}")
-
-
 def voice_key(job: dict) -> str:
+    """Hash of a voice's (or a percussion track's) inputs.  pickle writes the units, arrays and numbers
+    exactly and in order (the planner builds them the same way every run)."""
     h = hashlib.sha256(_code_fingerprint())
-    _feed(h, job)
+    h.update(pickle.dumps(job, protocol=5))
     return h.hexdigest()
 
 
+def part_key(voice_keys, gain) -> str:
+    """Hash for a value computed from a part's voices and dynamics curve."""
+    h = hashlib.sha256(b"part" + "".join(voice_keys).encode())
+    h.update(np.ascontiguousarray(gain).tobytes())
+    return h.hexdigest()
+
+
+_VALUES = None
+MAX_VALUES = 4000
+
+
+def _values_file() -> Path:
+    return cache_dir() / "values.json"
+
+
+def load_value(key: str):
+    global _VALUES
+    if _VALUES is None:
+        try:
+            _VALUES = json.loads(_values_file().read_text())
+        except (OSError, ValueError):
+            _VALUES = {}
+    return _VALUES.get(key)
+
+
+def store_value(key: str, value) -> None:
+    if load_value(key) == value:
+        return
+    _VALUES[key] = value
+    while len(_VALUES) > MAX_VALUES:
+        del _VALUES[next(iter(_VALUES))]           # oldest first
+    try:
+        cache_dir().mkdir(parents=True, exist_ok=True)
+        tmp = cache_dir() / f".values.{os.getpid()}.json"
+        tmp.write_text(json.dumps(_VALUES))
+        os.replace(tmp, _values_file())
+    except OSError:
+        pass
+
+
+_OPEN = {}            # key -> (track, warnings): the voices used most recently
+_OPEN_LOCK = threading.Lock()
+KEEP_OPEN = 48
+
+
 def load(key: str):
-    """(track, air warnings) of a cached voice, or None."""
+    """(track, air warnings) of a cached voice, or None.  The track is
+    read-only, straight from the file.  The most recent ones stay mapped
+    in memory between renders (the render server's): opening and closing a
+    voice's file every time costs more than reading it."""
     d = cache_dir()
     npy, meta = d / f"{key}.npy", d / f"{key}.json"
     try:
-        ys = np.load(npy)
-        warnings = [tuple(w) for w in json.loads(meta.read_text())]
         os.utime(npy)                       # recently used: keep it longest
+        if key in _OPEN:
+            _OPEN[key] = _OPEN.pop(key)     # most recent last
+            return _OPEN[key]
+        ys = np.asarray(np.load(npy, mmap_mode="r"))
+        warnings = [tuple(w) for w in json.loads(meta.read_text())]
     except (OSError, ValueError):
+        _OPEN.pop(key, None)
         return None
+    with _OPEN_LOCK:
+        _OPEN[key] = (ys, warnings)
+        while len(_OPEN) > KEEP_OPEN:
+            del _OPEN[next(iter(_OPEN))]
     return ys, warnings
 
 
-def store(key: str, ys: np.ndarray, warnings) -> None:
+def store(key: str, ys: np.ndarray, warnings) -> bool:
+    """Keep a voice; False if it couldn't be written (the cache is then
+    just slower)."""
     d = cache_dir()
     try:
         d.mkdir(parents=True, exist_ok=True)
-        tmp = d / f".{key}.{os.getpid()}.npy"
-        np.save(tmp, np.asarray(ys, dtype=np.float32))
+        tmp = d / f".{key}.{os.getpid()}.{threading.get_ident()}.npy"
+        np.save(tmp, ys)
         (d / f"{key}.json").write_text(json.dumps([list(w) for w in warnings]))
         os.replace(tmp, d / f"{key}.npy")
+        return True
     except OSError:
-        pass                                # a cache that can't be written is just slower
+        return False
 
 
 def prune(limit: int = LIMIT_BYTES) -> None:
