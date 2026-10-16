@@ -194,7 +194,7 @@ final class Helper: NSObject, NSApplicationDelegate {
             return
         }
         timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { _ in self.poll() }
+        timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in self.poll() }
     }
 
     func status() -> [String: Any]? {

@@ -68,7 +68,7 @@ the parts that changed, and changing only the mix (`--gain`, `--focus`,
 `--reverb`) sings nothing again. A reused voice is the same, sample for
 sample, as a fresh render. A 2½-minute song with 9 voices renders in about
 2½ s, 1 s after changing one part, and ½ s with nothing changed (plus about
-a second for Python to start).
+a second for Python to start; renders from MuseScore skip that, see below).
 Without numba it takes several times longer and sounds the same (the files
 differ by at most the last bit of a sample, here and there).
 `--no-cache` sings everything again; `--jobs N` sets how many voices render at
@@ -102,7 +102,13 @@ extension (already enabled) and a small background helper app. Then:
    channel's Audio FX. Press Play.
 
 Render again after editing: only the parts you changed are sung again, and
-the new render takes over even mid-playback.
+the new render takes over even mid-playback. Renders from MuseScore go
+through a small render server that keeps the renderer loaded between
+renders, so a 3-minute, 5-part song renders again in about 0.6 s after
+editing one part (0.3 s with nothing changed). The first render starts it,
+which adds a second or so; it quits after 20 minutes without a render and
+restarts by itself when the renderer is updated (its log is `server.log`
+in `~/Library/Application Support/AcappellaRender/`).
 Switch the effect off in the Mixer to hear MuseScore's sounds again. While
 playback is stopped MuseScore's sound passes through, so clicking notes
 still sounds. "Keep MuseScore's own sound underneath" in the dialog mixes it
