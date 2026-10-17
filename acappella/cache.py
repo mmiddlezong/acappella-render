@@ -54,6 +54,16 @@ def _code_fingerprint() -> bytes:
     return _CODE
 
 
+def code_fingerprint() -> bytes:
+    """Changes with the synthesizer's and the mixer's code (and numpy's and scipy's)."""
+    return _code_fingerprint()
+
+
+def track_path(key: str) -> Path:
+    """Where the track cached under key is (a .npy file)."""
+    return cache_dir() / f"{key}.npy"
+
+
 def voice_key(job: dict) -> str:
     """Hash of a voice's (or a percussion track's) inputs.  pickle writes the units, arrays and numbers
     exactly and in order (the planner builds them the same way every run)."""
@@ -102,32 +112,19 @@ def store_value(key: str, value) -> None:
         pass
 
 
-_OPEN = {}            # key -> (track, warnings): the voices used most recently
-_OPEN_LOCK = threading.Lock()
-KEEP_OPEN = 48
-
-
 def load(key: str):
-    """(track, air warnings) of a cached voice, or None.  The track is
-    read-only, straight from the file.  The most recent ones stay mapped
-    in memory between renders (the render server's): opening and closing a
-    voice's file every time costs more than reading it."""
+    """(track, air warnings) of a cached voice, or None.  The file is read
+    in one go: a voice not used for a while is often no longer in memory,
+    and reading it through a memory map, page by page, is several times
+    slower then."""
     d = cache_dir()
     npy, meta = d / f"{key}.npy", d / f"{key}.json"
     try:
-        os.utime(npy)                       # recently used: keep it longest
-        if key in _OPEN:
-            _OPEN[key] = _OPEN.pop(key)     # most recent last
-            return _OPEN[key]
-        ys = np.asarray(np.load(npy, mmap_mode="r"))
+        ys = np.load(npy)
         warnings = [tuple(w) for w in json.loads(meta.read_text())]
+        os.utime(npy)                       # recently used: keep it longest
     except (OSError, ValueError):
-        _OPEN.pop(key, None)
         return None
-    with _OPEN_LOCK:
-        _OPEN[key] = (ys, warnings)
-        while len(_OPEN) > KEEP_OPEN:
-            del _OPEN[next(iter(_OPEN))]
     return ys, warnings
 
 

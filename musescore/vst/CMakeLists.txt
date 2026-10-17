@@ -1,4 +1,4 @@
-# Acappella Render VST3 effect (see player.cpp). Built by ../install.sh:
+# Acappella Render VST3 effects (see player.cpp). Built by ../install.sh:
 #   cmake -S . -B build -DVST3_SDK_DIR=/path/to/vst3sdk && cmake --build build --config Release
 cmake_minimum_required(VERSION 3.25)
 
@@ -31,11 +31,19 @@ project(AcappellaRender VERSION 1.0.0)
 add_subdirectory("${VST3_SDK_DIR}" "${PROJECT_BINARY_DIR}/vst3sdk")
 smtg_enable_vst3_sdk()
 
-smtg_add_vst3plugin(AcappellaRender
-    player.cpp
-    "${VST3_SDK_DIR}/public.sdk/source/vst/vstsinglecomponenteffect.cpp")
-target_link_libraries(AcappellaRender PRIVATE sdk)
-target_compile_features(AcappellaRender PRIVATE cxx_std_17)
+# the master-bus player, and the effect for a part's channel (the same code,
+# built with ACAPPELLA_PART): MuseScore only loads one effect from a bundle
+foreach(target AcappellaRender AcappellaRenderPart)
+    smtg_add_vst3plugin(${target}
+        player.cpp
+        "${VST3_SDK_DIR}/public.sdk/source/vst/vstsinglecomponenteffect.cpp")
+    target_link_libraries(${target} PRIVATE sdk)
+    target_compile_features(${target} PRIVATE cxx_std_17)
+endforeach()
+target_compile_definitions(AcappellaRenderPart PRIVATE ACAPPELLA_PART=1)
 smtg_target_set_bundle(AcappellaRender
     BUNDLE_IDENTIFIER "com.github.acappella-render.player"
+    COMPANY_NAME "acappella-render")
+smtg_target_set_bundle(AcappellaRenderPart
+    BUNDLE_IDENTIFIER "com.github.acappella-render.part"
     COMPANY_NAME "acappella-render")

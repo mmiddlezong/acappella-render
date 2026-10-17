@@ -1,7 +1,9 @@
 #!/bin/bash
 # Installs the MuseScore 4 integration (macOS):
 #   - the "Acappella Render" VST3 effect, which plays the render in sync with
-#     MuseScore's playback when it sits on the Master channel
+#     MuseScore's playback when it sits on the Master channel, and the
+#     "Acappella Render Part" effect, which lets MuseScore's mute and solo
+#     buttons switch a part of the render when it sits on that part's channel
 #   - the "Acappella Render" MuseScore extension: a one-click Render button and
 #     a Settings and status window on the Extensions toolbar of the Score page
 #   - a small background helper app that the Render button's
@@ -18,6 +20,7 @@ BUILD="$HERE/build"
 SDK="$BUILD/vst3sdk"
 DATA="$HOME/Library/Application Support/AcappellaRender"
 VST="$HOME/Library/Audio/Plug-Ins/VST3/Acappella Render.vst3"
+PART_VST="$HOME/Library/Audio/Plug-Ins/VST3/Acappella Render Part.vst3"
 MS_DATA="$HOME/Library/Application Support/MuseScore/MuseScore4"
 EXT_DIR="$MS_DATA/extensions/acappella_render"
 OLD_PLUGIN="$HOME/Documents/MuseScore4/Plugins/AcappellaRender"    # where 1.0 installed
@@ -26,8 +29,8 @@ LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchSe
 
 if [ "${1:-}" = "--uninstall" ]; then
     [ -d "$HELPER" ] && "$LSREGISTER" -u "$HELPER" 2>/dev/null || true
-    rm -rf "$VST" "$EXT_DIR" "$OLD_PLUGIN" "$HELPER"
-    echo "Removed the effect and the extension. Renders are still in $DATA"
+    rm -rf "$VST" "$PART_VST" "$EXT_DIR" "$OLD_PLUGIN" "$HELPER"
+    echo "Removed the effects and the extension. Renders are still in $DATA"
     exit 0
 fi
 
@@ -57,14 +60,19 @@ cmake -S "$HERE/vst" -B "$BUILD/vst" -DVST3_SDK_DIR="$SDK" >/dev/null
 cmake --build "$BUILD/vst" -j 8
 
 mkdir -p "$(dirname "$VST")" "$EXT_DIR" "$DATA"
-rm -rf "$VST"
+# (a MuseScore that's running keeps the copies it loaded: the old ones are
+# removed, not overwritten)
+rm -rf "$VST" "$PART_VST"
 cp -R "$BUILD/vst/VST3/Release/AcappellaRender.vst3" "$VST"
-codesign --force --sign - "$VST" >/dev/null 2>&1 || true
-# what MuseScore does for a new plugin it finds at startup
+cp -R "$BUILD/vst/VST3/Release/AcappellaRenderPart.vst3" "$PART_VST"
 MSCORE="/Applications/MuseScore 4.app/Contents/MacOS/mscore"
-if [ -x "$MSCORE" ]; then
-    "$MSCORE" --register-audio-plugin "$VST" >/dev/null 2>&1 || true
-fi
+for bundle in "$VST" "$PART_VST"; do
+    codesign --force --sign - "$bundle" >/dev/null 2>&1 || true
+    # what MuseScore does for a new plugin it finds at startup
+    if [ -x "$MSCORE" ]; then
+        "$MSCORE" --register-audio-plugin "$bundle" >/dev/null 2>&1 || true
+    fi
+done
 
 rm -rf "$OLD_PLUGIN"
 "$PY" - "$HERE/extension" "$EXT_DIR" "$PY" "$HERE/bridge.py" "$DATA" "$MS_DATA/extensions/config.json" <<'EOF'
@@ -133,7 +141,8 @@ codesign --force --deep --sign - "$HELPER" >/dev/null 2>&1 || true
 cat <<MSG
 
 Installed:
-  effect:    $VST
+  effects:   $VST
+             $PART_VST
   extension: $EXT_DIR
   helper:    $HELPER
 
@@ -146,6 +155,9 @@ Next, in MuseScore 4:
   3. Once per score: open the Mixer and add "Acappella Render" to the Master
      channel's Audio FX. Press Play: you hear the render, following the cursor.
      Switch the effect off to hear MuseScore's own sounds again.
+  4. For mute and solo: add "Acappella Render Part" to each part's Audio FX
+     too, then Render once. The Mixer's mute and solo buttons then switch the
+     render's parts while it plays.
 MSG
 if pgrep -qf "MuseScore 4.app/Contents/MacOS/mscore"; then
     echo "MuseScore is running: quit and reopen it. If the toolbar buttons don't show up,"

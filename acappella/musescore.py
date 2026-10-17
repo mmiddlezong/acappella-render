@@ -7,6 +7,11 @@ MuseScore's master bus at the result, via a small manifest file:
 
     ~/Library/Application Support/AcappellaRender/current.txt
 
+Parts whose mixer channel has an "Acappella Render Part" effect also get a
+track of their own in it, with the ids of those effects (MuseScore keeps
+them in the score's audiosettings.json): the effect on the master bus
+leaves a part out while MuseScore has it muted (or another part soloed).
+
 Progress goes to status.json next to it, which the plugin's dialog polls.
 The settings of the last render are kept in settings.json, so the one-click
 Render button can render the same way again.  Voices that didn't change
@@ -48,11 +53,14 @@ def _status(**kw):
 
 
 def _read_manifest() -> dict:
+    """The manifest's settings; its "stem" lines (one per part track) as a list."""
     out = {}
     try:
         for line in MANIFEST.read_text(encoding="utf-8").splitlines():
             k, _, v = line.partition(" ")
-            if k:
+            if k == "stem":
+                out.setdefault("stem", []).append(v)
+            elif k:
                 out[k] = v
     except OSError:
         pass
@@ -62,7 +70,48 @@ def _read_manifest() -> dict:
 def _write_manifest(m: dict):
     order = ["audio", "offset", "render_gain", "musescore_gain", "title", "score"]
     keys = order + [k for k in m if k not in order]
-    _write_atomic(MANIFEST, "".join(f"{k} {m[k]}\n" for k in keys if k in m))
+    lines = []
+    for k in keys:
+        if k not in m:
+            continue
+        for v in (m[k] if k == "stem" else [m[k]]):
+            lines.append(f"{k} {v}\n")
+    _write_atomic(MANIFEST, "".join(lines))
+
+
+PART_EFFECT = "Acappella Render Part"
+
+
+def part_effects(path: Path) -> dict:
+    """{MuseScore part id: [ids of the Acappella Render Part effects on its
+    mixer channel]}, as saved in the score.  Each effect keeps its id in
+    its state ("ACRP" + 32 hex digits), which MuseScore saves base64-encoded."""
+    import base64
+    import zipfile
+    try:
+        with zipfile.ZipFile(path) as z:
+            settings = json.loads(z.read("audiosettings.json"))
+    except (OSError, KeyError, ValueError, zipfile.BadZipFile):
+        return {}
+    out = {}
+    for track in settings.get("tracks") or []:
+        chain = ((track.get("out") or {}).get("fxChain")) or {}
+        for fx in chain.values():
+            meta = fx.get("resourceMeta") or {}
+            if meta.get("id") != PART_EFFECT or not fx.get("active", True):
+                continue
+            config = fx.get("unitConfiguration") or {}
+            for k in ("componentState", "controllerState"):
+                try:
+                    state = base64.b64decode(config.get(k) or "")
+                except ValueError:
+                    continue
+                if state[:4] == b"ACRP" and len(state) >= 36:
+                    ids = out.setdefault(str(track.get("partId", "")), [])
+                    effect_id = state[4:36].decode("ascii", "replace")
+                    if effect_id not in ids:
+                        ids.append(effect_id)
+    return out
 
 
 def find_score(name: str) -> Path:
@@ -131,11 +180,22 @@ def render_for_musescore(name: str, request: str, singers=2, neutral=None, muses
     def progress(text):
         _status(state="rendering", request=request, score=name, started=started, message=text)
 
+    # parts with an Acappella Render Part effect get their own track
+    effects = part_effects(path)
+    tracks = {} if effects else None
     log = io.StringIO()
     with contextlib.redirect_stdout(log):
-        render_score(path, out=out, singers=singers, neutral=neutral or None, progress=progress)
-    _write_manifest({"audio": str(out), "offset": f"{PREROLL:g}", "render_gain": "1",
-                     "musescore_gain": f"{musescore_gain:g}", "title": name, "score": str(path)})
+        render_score(path, out=out, singers=singers, neutral=neutral or None, progress=progress,
+                     part_tracks=tracks)
+    manifest = {"audio": str(out), "offset": f"{PREROLL:g}", "render_gain": "1",
+                "musescore_gain": f"{musescore_gain:g}", "title": name, "score": str(path)}
+    if tracks:
+        from .synth import SR
+        manifest["rate"] = str(SR)
+        manifest["stem_gain"] = f"{tracks['gain']:.9g}"
+        manifest["stem"] = [f"{','.join(effects.get(part_id, [])) or '-'} {track}"
+                            for part_id, track in tracks["parts"]]
+    _write_manifest(manifest)
     for old in sorted(out_dir.glob("*.wav"), key=lambda p: p.stat().st_mtime)[:-KEEP_RENDERS]:
         old.unlink(missing_ok=True)
     lines = log.getvalue().splitlines()

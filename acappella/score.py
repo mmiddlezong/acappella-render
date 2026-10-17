@@ -59,6 +59,7 @@ class Staff:
     hairpins: list = field(default_factory=list)     # (start, end, +1/-1)
     breaths: list = field(default_factory=list)      # positions
     percussion: bool = False
+    part_id: str = ""            # the MuseScore part it belongs to (its mixer channel)
 
 
 @dataclass
@@ -271,7 +272,7 @@ def load_mscx(path: Path) -> Score:
                 if stype is not None and stype.get("group") == "percussion":
                     perc = True
             nm = name if n_st == 1 else f"{name} {k + 1}"
-            staff_info.append((nm, inst_id, perc))
+            staff_info.append((nm, inst_id, perc, part.get("id", "")))
 
     staff_els = [s for s in sc.findall("Staff") if s.find("Measure") is not None]
     warnings: list[str] = []
@@ -389,8 +390,10 @@ def load_mscx(path: Path) -> Score:
     staff_raw: list[list] = []
 
     for si, st in enumerate(staff_els):
-        nm, inst_id, perc = staff_info[si] if si < len(staff_info) else (f"Staff {si + 1}", "", False)
-        staff = Staff(name=nm, instrument=_voice_type_from_instrument(inst_id, nm), percussion=perc)
+        nm, inst_id, perc, part_id = (staff_info[si] if si < len(staff_info)
+                                      else (f"Staff {si + 1}", "", False, ""))
+        staff = Staff(name=nm, instrument=_voice_type_from_instrument(inst_id, nm), percussion=perc,
+                      part_id=part_id)
         slurs: list[tuple] = []     # (voice, score_start, score_end)
         raw_events: list[tuple] = []  # (mi, rel, ChordEvent, gliss/ties resolved later)
 

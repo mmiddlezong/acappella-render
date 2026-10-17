@@ -292,12 +292,19 @@ def keep_pool(workers=None, wait=True):
     _POOL = ProcessPoolExecutor(max_workers=workers, initializer=_join_pool,
                                 initargs=(multiprocessing.Value("i", 0),))
     warming = [_POOL.submit(_warm_up, k) for k in range(workers)]
-    if wait:
+
+    def warm_here():
         _warm_up()
+        # the room's impulse response, for every mix from now on
+        width = next_fast_len(REVERB_BLOCK + _reverb_ir().shape[0] - 1, real=True)
+        _reverb_spectrum(width, np.float32)
+
+    if wait:
+        warm_here()
         for f in warming:
             f.result()
     else:
-        threading.Thread(target=_warm_up, daemon=True).start()
+        threading.Thread(target=warm_here, daemon=True).start()
 
 
 def close_pool():
@@ -383,12 +390,94 @@ def _render_voices(jobs, use_cache=True, workers=None, progress=None, part_gains
     return out, unchanged, keys, louds
 
 
+def _place(mix, ys, pan, scale=1.0):
+    """mix += ys * scale, panned (equal power)."""
+    from . import synth
+    fast = synth._fast
+    lg, rg = np.cos((pan + 1) * np.pi / 4), np.sin((pan + 1) * np.pi / 4)
+    root2 = np.sqrt(2)
+    if fast is not None:
+        fast.parallel(fast.place, mix, ys, ys.dtype.type(scale), lg, rg, root2)
+    else:
+        ys = ys * scale
+        mix[:len(ys), 0] += ys * lg * root2
+        mix[:len(ys), 1] += ys * rg * root2
+
+
+def _add_reverb(mix, reverb):
+    """The room, added to the stereo mix in place: the mono mix through
+    each channel's impulse response."""
+    if reverb <= 0:
+        return
+    from . import synth
+    fast = synth._fast
+    N = mix.shape[0]
+    if fast is not None:
+        # a block of the song at a time (the forward transforms shared by
+        # both channels, all the blocks at once on every core), the blocks'
+        # tails overlapping the blocks after them.  In single precision,
+        # which is still far finer than the 16-bit file, and quicker: the
+        # transforms are as fast as memory.
+        m = REVERB_BLOCK
+        width = next_fast_len(m + _reverb_ir().shape[0] - 1, real=True)
+        blocks = np.zeros(((N + m - 1) // m, width), dtype=np.float32)
+        fast.parallel(fast.mono_blocks, mix, blocks, m)
+        spec = rfft(blocks, axis=1, workers=-1)
+        del blocks
+        heard = np.empty_like(spec)
+        for c, room in enumerate(_reverb_spectrum(width, np.float32)):
+            fast.parallel(fast.times, spec, room, heard)
+            wet = irfft(heard, width, axis=1, workers=-1, overwrite_x=True)
+            fast.parallel(fast.add_wet_blocks, mix, c, wet, m, float(reverb))
+    else:
+        # the same, the whole song as one block
+        L = next_fast_len(N + _reverb_ir().shape[0] - 1, real=True)
+        spec = rfft(mix.mean(axis=1), L, workers=-1)
+        for c, room in enumerate(_reverb_spectrum(L)):
+            wet = irfft(spec * room, L, workers=-1)[:N]
+            mix[:, c] += wet * reverb * 0.9
+
+
+def _part_track(tracks, N, reverb, use_cache=True):
+    """(float32 frames, cache key) of one part's stereo track: its tracks
+    [(track, pan, scale, cache key)] placed, with their own reverb.  From
+    the cache if every track it's made of is unchanged."""
+    import hashlib
+    import pickle
+    keyed = use_cache and all(k for _y, _p, _s, k in tracks)
+    if keyed:
+        h = hashlib.sha256(b"part track" + cache.code_fingerprint())
+        h.update(pickle.dumps((N, float(reverb), [(k, float(p), float(sc)) for _y, p, sc, k in tracks]),
+                              protocol=5))
+        key = h.hexdigest()
+        got = cache.load(key)
+        if got is not None and got[0].shape == (N, 2):
+            return got[0], key
+    else:
+        key = os.urandom(16).hex()
+    buf = np.zeros((N, 2))
+    for ys, pan, scale, _k in tracks:
+        _place(buf, ys, pan, scale)
+    _add_reverb(buf, reverb)
+    ys = buf.astype(np.float32)
+    del buf
+    cache.store(key, ys, [])
+    return ys, key
+
+
 def render_score(path, out=None, bpm=None, tempo_scale=1.0, lang="auto", voices=None,
                  gains=None, focus=None, only=None, mute=None, stems=False, reverb=0.25,
                  vibrato=1.0, measures=None, report=False, quiet=False, singers=2,
                  humanize=1.0, breaths=1.0, attack=1.0, neutral=None, solo=None,
-                 use_cache=True, workers=None, progress=None):
-    """progress(text), if given, hears what the render is doing."""
+                 use_cache=True, workers=None, progress=None, part_tracks=None):
+    """progress(text), if given, hears what the render is doing.
+
+    part_tracks, if given (a dict), also gets each MuseScore part's own
+    stereo track, so a player can leave parts out (MuseScore's mute and
+    solo): "parts" is a list of (part id, .npy file of float32 frames),
+    reverb included, which add up to the mix; "gain" scales them the way
+    the mix file is scaled.  They're kept in the voice cache, so a part
+    that didn't change isn't mixed again."""
     def say(text):
         if progress:
             progress(text)
@@ -515,12 +604,15 @@ def render_score(path, out=None, bpm=None, tempo_scale=1.0, lang="auto", voices=
         part_gains + [None] * len(perc_jobs))
     say("Mixing")
     perc_tracks = iter(ys for ys, _air in sung[len(voice_jobs):])
+    perc_keys = iter(voice_keys[len(voice_jobs):])
     sung = iter(sung[:len(voice_jobs)])
     voice_keys = iter(voice_keys)
     louds = iter(louds)
     from . import synth
     fast = synth._fast
-    root2 = np.sqrt(2)
+    # with part_tracks, what goes into each part's track: (track, pan,
+    # scale, its cache key), by part
+    placed = {}
     for st, name, kind, is_solo, units, hits, gain, seed, jobs, perc_job in parts:
         nm = st.name.lower()
         voices_out = []
@@ -548,14 +640,11 @@ def render_score(path, out=None, bpm=None, tempo_scale=1.0, lang="auto", voices=
         pan0 = _pan(staff_names.index(st.name), len(staff_names), st.name, kind)
         stem = stem_sigs.setdefault(st.name, np.zeros(N)) if stems else None
 
-        def place(ys, pan, scale=1.0):
-            lg, rg = np.cos((pan + 1) * np.pi / 4), np.sin((pan + 1) * np.pi / 4)
-            if fast is not None:
-                fast.parallel(fast.place, mix, ys, ys.dtype.type(scale), lg, rg, root2)
+        def place(ys, pan, scale=1.0, key=None):
+            if part_tracks is not None:
+                placed.setdefault(st.part_id or st.name, []).append((ys, pan, scale, key))
             else:
-                ys = ys * scale
-                mix[:len(ys), 0] += ys * lg * root2
-                mix[:len(ys), 1] += ys * rg * root2
+                _place(mix, ys, pan, scale)
 
         if voices_out:
             # every part is calibrated to the same loudness at 'f' (0 dB); the
@@ -570,52 +659,35 @@ def render_score(path, out=None, bpm=None, tempo_scale=1.0, lang="auto", voices=
                 if pkey:
                     cache.store_value(pkey, ref)
             scale = PART_REF / ref * 10 ** (part_db / 20.0)
-            for spread, ys in voices_out:
-                place(ys, float(np.clip(pan0 + 0.12 * spread, -1.0, 1.0)), scale)
+            for (spread, ys), key in zip(voices_out, keys):
+                place(ys, float(np.clip(pan0 + 0.12 * spread, -1.0, 1.0)), scale, key)
             if stems:
                 if y is None:
                     y = np.sum([v for _s, v in voices_out], axis=0)
                 y = y * scale
                 stem[:len(y)] += y
         if perc_job is not None:
-            yp = next(perc_tracks) * 10 ** (part_db / 20.0)
-            place(yp, pan0)
+            yp = next(perc_tracks)
+            place(yp, pan0, 10 ** (part_db / 20.0), next(perc_keys))
             if stems:
-                stem += yp
+                stem += yp * 10 ** (part_db / 20.0)
         rendered.append((name, kind, len(units), n_sing, len(hits)))
 
-    if reverb > 0 and fast is not None:
-        # the room: the mono mix through each channel's impulse response, a
-        # block of the song at a time (the forward transforms shared by both
-        # channels, all the blocks at once on every core), the blocks' tails
-        # overlapping the blocks after them.  In single precision, which is
-        # still far finer than the 16-bit file, and quicker: the transforms
-        # are as fast as memory.
-        m = REVERB_BLOCK
-        width = next_fast_len(m + _reverb_ir().shape[0] - 1, real=True)
-        blocks = np.zeros(((N + m - 1) // m, width), dtype=np.float32)
-        fast.parallel(fast.mono_blocks, mix, blocks, m)
-        spec = rfft(blocks, axis=1, workers=-1)
-        del blocks
-        heard = np.empty_like(spec)
-        for c, room in enumerate(_reverb_spectrum(width, np.float32)):
-            fast.parallel(fast.times, spec, room, heard)
-            wet = irfft(heard, width, axis=1, workers=-1, overwrite_x=True)
-            fast.parallel(fast.add_wet_blocks, mix, c, wet, m, float(reverb))
-        del spec, heard, wet
-    elif reverb > 0:
-        # the same, the whole song as one block
-        L = next_fast_len(N + _reverb_ir().shape[0] - 1, real=True)
-        spec = rfft(mix.mean(axis=1), L, workers=-1)
-        for c, room in enumerate(_reverb_spectrum(L)):
-            wet = irfft(spec * room, L, workers=-1)[:N]
-            mix[:, c] += wet * reverb * 0.9
-        del spec, wet
+    if part_tracks is not None:
+        part_tracks["parts"] = []
+        for part_id, tracks in placed.items():
+            ys = _part_track(tracks, N, reverb, use_cache)
+            part_tracks["parts"].append((part_id, cache.track_path(ys[1])))
+            mix += ys[0]
+    else:
+        _add_reverb(mix, reverb)
     if fast is not None:
         peak = fast.parallel(fast.peak, mix) + 1e-9
     else:
         peak = max(float(mix.max()), -float(mix.min())) + 1e-9
     gain_norm = 0.89 / peak
+    if part_tracks is not None:
+        part_tracks["gain"] = gain_norm
 
     out = Path(out) if out else path.with_suffix(".mp3")
     pcm = None

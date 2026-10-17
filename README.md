@@ -84,7 +84,7 @@ plays the render instead of MuseScore's sounds.
 musescore/install.sh
 ```
 
-This builds and installs the "Acappella Render" VST3 effect (it fetches the
+This builds and installs the "Acappella Render" VST3 effects (it fetches the
 MIT-licensed VST 3 SDK into `musescore/build/` the first time; needs CMake
 and the Xcode command line tools), the "Acappella Render" MuseScore
 extension (already enabled) and a small background helper app. Then:
@@ -114,11 +114,25 @@ playback is stopped MuseScore's sound passes through, so clicking notes
 still sounds. "Keep MuseScore's own sound underneath" in the dialog mixes it
 in quietly during playback too (handy with the metronome).
 
+**Mute and solo.** The Mixer's mute and solo buttons only reach a part's own
+channel, not the Master's effects, so for them to switch the render's parts
+add the second effect, **Acappella Render Part**, to the Audio FX of each
+part you want to mute or solo (once per score), then Render. Then muting a
+part, or soloing another, takes it out of the render as it plays (within a
+few milliseconds, with its share of the reverb), and unmuting brings it
+back. Each Part effect has an id that MuseScore saves with the score; the
+Render button saves the score first, and the render then has a track of its
+own for each part with one. Parts without a Part effect can't be muted, and
+switching a part's Part effect off mutes that part too (MuseScore then stops
+running it, which is how a muted part looks to the render). Rendering with
+Part effects takes a little longer the first time (each part's track is
+mixed and kept), and about the same afterwards.
+
 The render is timed exactly the way MuseScore times playback (see Tempo
 below), so it stays with the cursor. Keep the playback speed at 100% and repeats on:
 the render doesn't follow MuseScore's speed slider, and D.S./D.C./Coda jumps
 aren't rendered, so playback drifts after the first jump.
-`musescore/install.sh --uninstall` removes the effect, the extension and the
+`musescore/install.sh --uninstall` removes the effects, the extension and the
 helper. Renders are kept in `~/Library/Application Support/AcappellaRender/`
 (the last 3).
 
