@@ -128,6 +128,13 @@ running it, which is how a muted part looks to the render). Rendering with
 Part effects takes a little longer the first time (each part's track is
 mixed and kept), and about the same afterwards.
 
+**Metronome.** With a Part effect on every part, the parts' own MuseScore
+sound is already silent, so the Master effect lets everything else through
+as it is: the metronome (the toolbar button, or its channel in the Mixer)
+clicks along with the render. Without Part effects on every part it's
+replaced along with MuseScore's other sounds, unless "Keep MuseScore's own
+sound underneath" is on.
+
 The render is timed exactly the way MuseScore times playback (see Tempo
 below), so it stays with the cursor. Keep the playback speed at 100% and repeats on:
 the render doesn't follow MuseScore's speed slider, and D.S./D.C./Coda jumps

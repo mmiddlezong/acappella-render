@@ -237,6 +237,10 @@ struct Render {
     std::vector<float> samples;   // interleaved stereo (without part tracks)
     std::vector<Stem> stems;      // or each part's track
     float stemGain = 1.f;
+    bool covered = false;         // audio thread: every part track has a part effect,
+                                  // so all of MuseScore's part sound is silenced at the
+                                  // source and what reaches the master bus is the rest
+                                  // (the metronome)
     int64_t frames = 0;
     double rate = 44100.0;
     double offset = 0.0;          // seconds into the file at MuseScore time 0
@@ -527,6 +531,10 @@ public:
             nIn = data.inputs[0].numChannels;
         }
         const float target = advancing ? 1.f : 0.f;
+        // while the render plays, MuseScore's sound is replaced, but once every
+        // part silences its own (part effects), the rest of it, the metronome,
+        // comes through as it is
+        const float underGain = m_main.r && m_main.r->covered && museGain <= 0.f ? 1.f : museGain;
 
         for (int32 i = 0; i < n; ++i) {
             if (m_fade < target) {
@@ -556,7 +564,7 @@ public:
             }
             const float inL = in ? in[0][i] : 0.f;
             const float inR = in ? in[std::min(1, nIn - 1)][i] : 0.f;
-            const float inGain = (1.f - m_fade) + m_fade * museGain;
+            const float inGain = (1.f - m_fade) + m_fade * underGain;
             const float wet = m_fade * renderGain;
             out[0][i] = l * wet + inL * inGain;
             if (nOut > 1) {
@@ -578,6 +586,7 @@ private:
     void updateTargets(Render* r, int64_t cycle)
     {
         uint64_t heard = 0;
+        bool covered = !r->stems.empty();
         for (size_t k = 0; k < r->stems.size(); ++k) {
             Stem& s = r->stems[k];
             bool present = false, alive = false;
@@ -585,10 +594,12 @@ private:
                 partState(id, cycle, present, alive);
             }
             s.target = !present || alive ? 1.f : 0.f;
+            covered = covered && present;
             if (s.target > 0.f && k < 64) {
                 heard |= uint64_t(1) << k;
             }
         }
+        r->covered = covered;
         if (r == m_main.r) {
             m_heard.store(heard, std::memory_order_relaxed);
         }
