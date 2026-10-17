@@ -2,7 +2,10 @@ numpy
 scipy
 cmudict
 lameenc
-numba        # optional, but renders several times faster
+# optional, but renders several times faster (the newest numba has no
+# Intel Mac build: Intel Macs get the last one that does)
+numba; platform_system != "Darwin" or platform_machine == "arm64"
+numba<0.63; platform_system == "Darwin" and platform_machine == "x86_64"
 # optional
 pypinyin
 music21
